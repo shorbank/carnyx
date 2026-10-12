@@ -1,17 +1,17 @@
 <script lang="ts">
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { isTauri } from "@tauri-apps/api/core";
+  import ChatPanel from "$lib/chat/ChatPanel.svelte";
 
   async function startDragging(event: PointerEvent) {
-    if (event.button === 0) {
+    if (event.button === 0 && isTauri()) {
       await getCurrentWindow().startDragging();
     }
   }
 </script>
 
 <main class="window">
-  <div class="box" onpointerdown={startDragging}>
-    <h1>Chat Window</h1>
-  </div>
+  <ChatPanel ondragstart={startDragging} />
 </main>
 
 <style>
@@ -20,6 +20,8 @@
     width: 100%;
     height: 100%;
     margin: 0;
+    overflow: hidden;
+    font-family: system-ui, sans-serif;
   }
 
   .window {
@@ -28,25 +30,5 @@
     height: 100%;
     place-items: center;
     color: #fff;
-    user-select: none;
-  }
-
-  .box {
-    cursor: grab;
-    clip-path: inset(0 round 200px);
-  }
-
-  .box:active {
-    cursor: grabbing;
-  }
-
-  .box {
-    background: rgba(55, 70, 55, 0.247);
-    width: 100%;
-    height: 100%;
-    border-radius: 200px;
-    display: flex;
-    justify-content: center;
-    align-items: center;
   }
 </style>

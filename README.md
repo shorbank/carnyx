@@ -13,13 +13,42 @@ A lightweight, transparent desktop overlay chat application built for direct pee
 
 ---
 
+## Current Local Chat
+
+The overlay currently supports a single local conversation stored only in memory.
+Enter sends a message; Shift+Enter inserts a line break. The Send button also sends
+and returns focus to the input. Messages display their local time. The list follows
+new messages when already at the bottom and preserves the reading position when
+scrolled up. Only the header moves the window.
+
+Reloading or closing the application clears all messages. Database storage, P2P
+communication, and click-through behavior are not implemented in this milestone.
+The UI components and per-view chat store live in `src/lib/chat/`.
+
+On desktop, only one Carnyx instance runs at a time. Launching the app again
+shows, restores, and focuses the existing chat window without resetting messages.
+This uses Tauri's [Single Instance plugin](https://v2.tauri.app/plugin/single-instance/).
+On macOS, an OS file lock also serializes simultaneous launches until the plugin
+is ready. The lock contains no messages and is automatically released on exit or
+crash. Failure to establish instance coordination stops startup.
+
+Validation (Node.js 22.6+ for the TypeScript store tests):
+
+```bash
+npm test
+npm run check
+npm run build
+```
+
+---
+
 ## Project Goals and Roadmap
 
 ### 1. UI and Widget Design (Frontend)
 
 - [ ] Implement a semi-transparent glassmorphism chat UI
 - [ ] Configure window click-through behavior (interact only with the chat window, pass clicks through the transparent background to the desktop)
-- [ ] Add message rendering and auto-scroll behavior
+- [x] Add message rendering and auto-scroll behavior
 
 ### 2. Backend and 24-Hour Cache (Rust)
 
