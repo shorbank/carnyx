@@ -67,7 +67,7 @@ mod tests {
         let path = directory.path().join("messages.sqlite");
         let state = crate::chat_state::initialize(&path).unwrap();
         let mut repository = SqliteMessageRepository::open(&path).unwrap();
-        let old = Message::new("expire", 0).unwrap();
+        let old = Message::local("expire", 0, repository.local_identity().peer_id()).unwrap();
         repository.insert(&old).unwrap();
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
@@ -94,7 +94,12 @@ mod tests {
         assert_eq!(event, serde_json::json!({"ids": [old.id()]}));
         assert!(repository.find_by_id(old.id()).unwrap().is_none());
         task.stop();
-        let after_stop = Message::new("keep after shutdown", 0).unwrap();
+        let after_stop = Message::local(
+            "keep after shutdown",
+            0,
+            repository.local_identity().peer_id(),
+        )
+        .unwrap();
         repository.insert(&after_stop).unwrap();
         assert!(receiver.recv_timeout(Duration::from_millis(150)).is_err());
         assert!(repository.find_by_id(after_stop.id()).unwrap().is_some());
