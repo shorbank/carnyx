@@ -21,8 +21,9 @@ and returns focus to the input. Messages display their local time. The list foll
 new messages when already at the bottom and preserves the reading position when
 scrolled up. Only the header moves the window.
 
-Reloading or closing the application clears all messages. Database storage, P2P
-communication, and click-through behavior are not implemented in this milestone.
+Reloading or closing the application clears all UI messages. The UI is not yet
+connected to the Rust database. P2P communication and click-through behavior
+are not implemented in this milestone.
 The UI components and per-view chat store live in `src/lib/chat/`.
 
 On desktop, only one Carnyx instance runs at a time. Launching the app again
@@ -40,6 +41,42 @@ npm run check
 npm run build
 ```
 
+## Rust Message Storage Foundation
+
+Startup opens `messages.sqlite` in Tauri's application data directory and keeps a
+message service in managed application state. On first use, a transaction creates
+schema version 1: `messages(id, text, created_at)`. Unknown schema versions and
+initialization errors stop startup; existing databases are never reset.
+
+The modules in `src-tauri/src/` have separate responsibilities:
+
+- `message`: trims outer whitespace, rejects empty text, and creates UUID-v4 IDs
+  and Unix timestamps in milliseconds. Inner whitespace and Unicode are preserved.
+- `message_service`: creates and stores a message through a repository interface,
+  returning success only after storage succeeds.
+- `sqlite_repository`: owns the SQLite connection, schema initialization, parameterized
+  inserts, and lookup by ID. SQLite is bundled through `rusqlite`.
+
+There are no new Tauri commands or frontend changes yet, so messages entered in
+the current chat still live only in memory. The Rust database currently has no
+24-hour cleanup, expiry filtering, or scheduled tasks. Sender and recipient fields
+will be introduced when those concepts are needed.
+
+Rust module tests use temporary directories, including reopening a database,
+duplicate IDs, validation, and failure cases. Run from `src-tauri`:
+
+```bash
+cargo test --lib
+cargo check
+cargo fmt --check
+```
+
+Build the desktop app from the project root:
+
+```bash
+npm run tauri build -- --debug --bundles app
+```
+
 ---
 
 ## Project Goals and Roadmap
@@ -52,8 +89,9 @@ npm run build
 
 ### 2. Backend and 24-Hour Cache (Rust)
 
-- [ ] Set up a local embedded database (`rusqlite`) in the application data directory
-- [ ] Implement a database schema for messages (`id`, `sender`, `recipient`, `text`, `timestamp`)
+- [x] Set up a local embedded database (`rusqlite`) in the application data directory
+- [x] Implement the initial local message schema (`id`, `text`, `created_at`)
+- [ ] Add sender and recipient fields when peer identities are introduced
 - [ ] Write an automated cleanup task to purge messages older than 24 hours on application startup
 - [ ] Expose Tauri Commands for the frontend to send and receive messages
 

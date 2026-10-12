@@ -1,5 +1,12 @@
-#[cfg(desktop)]
+use std::sync::Mutex;
 use tauri::Manager;
+
+pub mod message;
+pub mod message_service;
+pub mod sqlite_repository;
+
+use message_service::MessageService;
+use sqlite_repository::SqliteMessageRepository;
 
 #[cfg(target_os = "macos")]
 mod startup_lock;
@@ -35,9 +42,13 @@ pub fn run() {
         }
     }));
 
-    #[cfg(target_os = "macos")]
-    let builder = builder.setup(move |_| {
+    let builder = builder.setup(move |app| {
+        #[cfg(target_os = "macos")]
         startup_lock.finish()?;
+
+        let repository =
+            SqliteMessageRepository::open(app.path().app_data_dir()?.join("messages.sqlite"))?;
+        app.manage(Mutex::new(MessageService::new(repository)));
         Ok(())
     });
 
