@@ -1,8 +1,4 @@
-use std::{
-    error::Error,
-    fmt,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{error::Error, fmt};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -39,15 +35,18 @@ pub struct Message {
 }
 
 impl Message {
-    pub(crate) fn new(text: &str) -> Result<Self, MessageError> {
+    pub(crate) fn new(text: &str, created_at: i64) -> Result<Self, MessageError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(MessageError::EmptyText);
         }
+        if created_at < 0 {
+            return Err(MessageError::InvalidSystemTime);
+        }
         Ok(Self {
             id: Uuid::new_v4().to_string(),
             text: text.to_owned(),
-            created_at: unix_millis(SystemTime::now())?,
+            created_at,
         })
     }
 
@@ -71,46 +70,32 @@ impl Message {
     }
 }
 
-fn unix_millis(time: SystemTime) -> Result<i64, MessageError> {
-    let elapsed = time
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| MessageError::InvalidSystemTime)?;
-    i64::try_from(elapsed.as_millis()).map_err(|_| MessageError::InvalidSystemTime)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn preserves_inner_whitespace_unicode_and_literal_text() {
-        let message = Message::new(" \nGrüß dich 🦀\n  <b>Welt</b>\t ").unwrap();
+        let message = Message::new(" \nGrüß dich 🦀\n  <b>Welt</b>\t ", 1234).unwrap();
         assert_eq!(message.text(), "Grüß dich 🦀\n  <b>Welt</b>");
     }
 
     #[test]
     fn creates_distinct_v4_ids_and_millisecond_timestamps() {
-        let before = unix_millis(SystemTime::now()).unwrap();
-        let first = Message::new("Hallo").unwrap();
-        let second = Message::new("Hallo").unwrap();
-        let after = unix_millis(SystemTime::now()).unwrap();
+        let first = Message::new("Hallo", 1234).unwrap();
+        let second = Message::new("Hallo", 1234).unwrap();
         assert_ne!(first.id(), second.id());
         for message in [first, second] {
             let id = Uuid::parse_str(message.id()).unwrap();
             assert_eq!(id.get_version(), Some(uuid::Version::Random));
-            assert!((before..=after).contains(&message.created_at()));
+            assert_eq!(message.created_at(), 1234);
         }
-        assert_eq!(
-            unix_millis(UNIX_EPOCH + Duration::from_millis(1_234)).unwrap(),
-            1_234
-        );
     }
 
     #[test]
     fn rejects_times_before_the_epoch() {
         assert!(matches!(
-            unix_millis(UNIX_EPOCH - Duration::from_millis(1)),
+            Message::new("Hallo", -1),
             Err(MessageError::InvalidSystemTime)
         ));
     }

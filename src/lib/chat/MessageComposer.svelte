@@ -1,36 +1,37 @@
 <script lang="ts">
-  let { onsend }: { onsend: (text: string) => boolean } = $props();
-  let draft = $state("");
+  import { createComposerDraft } from "./composer-draft";
+  let { onsend, disabled = false }: { onsend: (text: string) => Promise<boolean>; disabled?: boolean } = $props();
+  const { state: draft, setText, send: save } = createComposerDraft((text) => onsend(text));
   let composing = $state(false);
   let input: HTMLTextAreaElement | undefined = $state();
 
-  function send() {
-    if (composing) return;
-    if (onsend(draft)) {
-      draft = "";
-      input?.focus();
-    }
+  async function send() {
+    if (composing || disabled) return;
+    if (await save()) input?.focus();
   }
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === "Enter" && !event.shiftKey &&
         !composing && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault();
-      send();
+      void send();
     }
   }
 </script>
 
-<form onsubmit={(event) => { event.preventDefault(); send(); }}>
+<form onsubmit={(event) => { event.preventDefault(); void send(); }}>
   <label for="message-input">Nachricht</label>
-  <textarea id="message-input" bind:this={input} bind:value={draft} rows="3"
+  <textarea id="message-input" bind:this={input} value={$draft.text} rows="3"
+    oninput={(event) => setText(event.currentTarget.value)}
     placeholder="Nachricht schreiben …" aria-describedby="message-hint"
     onkeydown={handleKeydown}
     oncompositionstart={() => { composing = true; }}
     oncompositionend={() => { composing = false; }}></textarea>
   <div class="actions">
     <small id="message-hint">Enter sendet · Shift+Enter: neue Zeile</small>
-    <button type="submit" disabled={!draft.trim() || composing}>Senden</button>
+    <button type="submit" disabled={disabled || !$draft.text.trim() || composing || $draft.sending}>
+      {$draft.sending ? "Speichert …" : "Senden"}
+    </button>
   </div>
 </form>
 

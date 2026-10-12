@@ -1,18 +1,14 @@
 <script lang="ts">
   import type { Message } from "./message";
+  import { formatMessageTime } from "./message-time";
 
   let { message }: { message: Message } = $props();
-  const timeFormatter = new Intl.DateTimeFormat("de-AT", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
 </script>
 
-<li>
+<li data-message-id={message.id}>
   <p>{message.text}</p>
   <time datetime={new Date(message.createdAt).toISOString()}>
-    {timeFormatter.format(message.createdAt)}
+    {formatMessageTime(message.createdAt)}
   </time>
 </li>
 

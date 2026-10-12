@@ -1,21 +1,15 @@
-use std::sync::Mutex;
 use tauri::Manager;
 
+mod chat_state;
+pub mod clock;
+mod commands;
 pub mod message;
 pub mod message_service;
+mod retention;
 pub mod sqlite_repository;
-
-use message_service::MessageService;
-use sqlite_repository::SqliteMessageRepository;
 
 #[cfg(target_os = "macos")]
 mod startup_lock;
-
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -46,15 +40,30 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         startup_lock.finish()?;
 
-        let repository =
-            SqliteMessageRepository::open(app.path().app_data_dir()?.join("messages.sqlite"))?;
-        app.manage(Mutex::new(MessageService::new(repository)));
+        let database_path = app.path().app_data_dir()?.join("messages.sqlite");
+        let state =
+            tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(move || {
+                chat_state::initialize(database_path)
+            }))?
+            .map_err(|error| error as Box<dyn std::error::Error>)?;
+        app.manage(state.clone());
+        app.manage(retention::RetentionTask::start(app.handle().clone(), state));
         Ok(())
     });
 
     builder
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
-        .run(context)
-        .expect("error while running tauri application");
+        .invoke_handler(tauri::generate_handler![
+            commands::list_messages,
+            commands::send_message
+        ])
+        .build(context)
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(task) = app.try_state::<retention::RetentionTask>() {
+                    task.stop();
+                }
+            }
+        });
 }

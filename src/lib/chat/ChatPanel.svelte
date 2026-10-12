@@ -1,10 +1,19 @@
 <script lang="ts">
   import { createChatStore } from "./chat-store";
+  import { onMount } from "svelte";
+  import { tauriChatApi } from "./chat-api";
+  import ChatStatus from "./ChatStatus.svelte";
   import MessageList from "./MessageList.svelte";
   import MessageComposer from "./MessageComposer.svelte";
 
   let { ondragstart }: { ondragstart: (event: PointerEvent) => void } = $props();
-  const { messages, sendMessage } = createChatStore();
+  const { state, sendMessage, start, refresh, dispose } = createChatStore(tauriChatApi);
+  onMount(() => {
+    void start();
+    const onfocus = () => { void refresh(); };
+    window.addEventListener("focus", onfocus);
+    return () => { window.removeEventListener("focus", onfocus); dispose(); };
+  });
 </script>
 
 <section class="chat" aria-label="Lokaler Chat">
@@ -15,14 +24,15 @@
       <span>Lokaler Chat</span>
     </button>
   </header>
-  <MessageList messages={$messages} />
-  <MessageComposer onsend={sendMessage} />
+  <div><ChatStatus state={$state} onretry={refresh} /></div>
+  <MessageList messages={$state.messages} ready={$state.loaded} />
+  <MessageComposer onsend={sendMessage} disabled={!$state.loaded} />
 </section>
 
 <style>
   .chat {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
     width: 100%;
     height: 100%;
     overflow: hidden;
