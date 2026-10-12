@@ -3,23 +3,36 @@
   import type { Message } from "./message";
   import MessageItem from "./MessageItem.svelte";
 
-  let { messages }: { messages: readonly Message[] } = $props();
+  let { messages, ready }: { messages: readonly Message[]; ready: boolean } = $props();
   let viewport: HTMLDivElement | undefined = $state();
+  let restored = false;
 
   $effect.pre(() => {
-    const count = messages.length;
+    const isReady = ready;
     const element = viewport;
-    if (!element || count === 0) return;
+    if (!element || !isReady) return;
 
     // Measure against the old DOM before the new message changes its height.
     const previousTop = element.scrollTop;
-    const followEnd = count === 1 ||
+    const followEnd = !restored ||
       element.scrollHeight - element.clientHeight - previousTop <= 24;
+    const remaining = followEnd ? new Set<string>() : new Set(messages.map((message) => message.id));
+    const top = element.getBoundingClientRect().top;
+    const anchor = followEnd ? undefined : [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
+      .find((row) => remaining.has(row.dataset.messageId!) && row.getBoundingClientRect().bottom > top);
+    const anchorId = anchor?.dataset.messageId;
+    const offset = anchor ? anchor.getBoundingClientRect().top - top : 0;
     let cancelled = false;
 
     void tick().then(() => {
       if (!cancelled) {
+        restored = true;
+        const nextAnchor = anchorId ? [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
+          .find((row) => row.dataset.messageId === anchorId) : undefined;
         element.scrollTop = followEnd ? element.scrollHeight : previousTop;
+        if (!followEnd && nextAnchor) {
+          element.scrollTop += nextAnchor.getBoundingClientRect().top - element.getBoundingClientRect().top - offset;
+        }
       }
     });
 
@@ -29,7 +42,7 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users need to focus this region to scroll it.) -->
 <div class="messages" bind:this={viewport} role="region" aria-label="Nachrichten" tabindex="0">
-  {#if messages.length === 0}
+  {#if ready && messages.length === 0}
     <p class="empty">Noch keine Nachrichten</p>
   {:else}
     <ol>
