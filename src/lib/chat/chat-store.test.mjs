@@ -209,3 +209,28 @@ test('appending a local message keeps received history ordered by local receipt 
   await f.chat.sendMessage('hello');
   assert.deepEqual(f.value().messages.map((m) => m.id), ['local', 'received']);
 });
+
+test('peer sends reload durable state instead of regressing an ACK with a late pending response', async () => {
+  const f = fixture(); let changed;
+  f.api.refreshAfterSend = true;
+  f.api.subscribeChanged = async (cb) => { changed=cb; return () => {}; };
+  await f.chat.start();
+  const saved = deferred();f.api.sendMessage = () => saved.promise;
+  const sending = f.chat.sendMessage('peer');
+  const acknowledged = { ...message('peer'), direction:'outgoing', deliveryStatus:'acknowledged' };
+  f.api.listMessages = async () => [acknowledged];changed();await f.chat.refresh();
+  saved.resolve({ ...acknowledged, deliveryStatus:'pending' });await sending;await f.chat.refresh();
+  assert.equal(f.value().messages[0].deliveryStatus,'acknowledged');
+});
+test('both listeners are cleaned up when the second subscription fails and on removal', async () => {
+  const f=fixture();let changedRemoved=0;
+  f.api.subscribeChanged=async()=>{throw { code:'not_available' };};await f.chat.start();assert.equal(f.unsubscribed(),1);
+  f.api.subscribeChanged=async()=>()=>changedRemoved++;await f.chat.refresh();f.chat.dispose();
+  assert.equal(f.unsubscribed(),2);assert.equal(changedRemoved,1);
+});
+test('independent conversation stores keep late peer results out of another conversation', async () => {
+  const a=fixture();const b=fixture([message('other-peer')]);const late=deferred();a.api.listMessages=()=>late.promise;
+  const loading=a.chat.start();await b.chat.start();late.resolve([message('first-peer')]);await loading;
+  assert.deepEqual(b.value().messages.map(m=>m.id),['other-peer']);assert.deepEqual(a.value().messages.map(m=>m.id),['first-peer']);
+  a.chat.dispose();b.chat.dispose();
+});

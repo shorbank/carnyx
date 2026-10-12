@@ -1,0 +1,34 @@
+name: Desktop checks
+on: [push, pull_request]
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm test
+      - run: npm run check
+      - run: cargo fmt --check
+        working-directory: src-tauri
+      - run: cargo check --locked
+        working-directory: src-tauri
+      - run: cargo test --lib --locked
+        working-directory: src-tauri
+      - if: runner.os == 'macOS'
+        run: npm run tauri build -- --debug --bundles app
+      - if: runner.os == 'Windows'
+        run: npm run tauri build -- --debug --bundles nsis

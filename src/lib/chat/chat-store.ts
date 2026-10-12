@@ -2,6 +2,7 @@ import { get, writable, type Readable } from "svelte/store";
 import type { ChatApi } from "./chat-api";
 import type { Message } from "./message";
 import { messageLocalTime } from "./message.ts";
+import { peerError } from "./peer-errors.ts";
 
 export interface ChatIssue {
   operation: "load" | "send" | "connection";
@@ -32,6 +33,7 @@ function issue(error: unknown, operation: ChatIssue["operation"]): ChatIssue {
   if (code === "empty_text") message = "Bitte eine Nachricht eingeben.";
   if (code === "invalid_time") message = "Die Systemzeit konnte nicht gelesen werden.";
   if (code === "not_available") message = "Der Chat ist nur in der Carnyx-Desktop-App verfügbar.";
+  if (["not_connected", "message_too_large", "protocol_error"].includes(String(code))) message = peerError(error);
   return { operation, message };
 }
 
@@ -40,6 +42,7 @@ export function createChatStore(api: ChatApi): ChatStore {
   let disposed = false;
   let revision = 0;
   let unlisten: (() => void) | undefined;
+  let unlistenChanged: (() => void) | undefined;
   let starting: Promise<void> | undefined;
   let loading: Promise<void> | undefined;
   let refreshRequested = false;
@@ -96,8 +99,14 @@ export function createChatStore(api: ChatApi): ChatStore {
         const unsubscribe = await api.subscribeExpired(expired);
         if (disposed) { unsubscribe(); return; }
         unlisten = unsubscribe;
+        if (api.subscribeChanged) {
+          const unsubscribeChanged = await api.subscribeChanged(() => { revision++; void load(); });
+          if (disposed) { unsubscribeChanged(); return; }
+          unlistenChanged = unsubscribeChanged;
+        }
         await load();
       } catch (error) {
+        unlisten?.(); unlistenChanged?.(); unlisten = undefined; unlistenChanged = undefined;
         if (!disposed) state.update((current) => ({ ...current, error: issue(error, "connection"), loading: false }));
       }
     })().finally(() => { starting = undefined; });
@@ -120,6 +129,7 @@ export function createChatStore(api: ChatApi): ChatStore {
         // A save response may be delivered after a long standby and expiry.
         if (expiredDuringSend.has(message.id)) return true;
         revision++;
+        if (api.refreshAfterSend) { void load(); return true; }
         state.update((value) => ({ ...value,
           messages: value.messages.some((existing) => existing.id === message.id) ? value.messages :
             [...value.messages, message].sort((a, b) => messageLocalTime(a) - messageLocalTime(b)) }));
@@ -137,6 +147,7 @@ export function createChatStore(api: ChatApi): ChatStore {
       expiredDuringSend.clear();
       unlisten?.();
       unlisten = undefined;
+      unlistenChanged?.(); unlistenChanged = undefined;
     },
   };
 }

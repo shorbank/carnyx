@@ -1,13 +1,15 @@
 <script lang="ts">
   import { createComposerDraft } from "./composer-draft";
-  let { onsend, disabled = false }: { onsend: (text: string) => Promise<boolean>; disabled?: boolean } = $props();
-  const { state: draft, setText, send: save } = createComposerDraft((text) => onsend(text));
+  let { onsend, disabled = false, controller }: { onsend: (text: string) => Promise<boolean>; disabled?: boolean; controller?: ReturnType<typeof createComposerDraft> } = $props();
+  const fallback = createComposerDraft((text) => onsend(text));
+  const current = $derived(controller ?? fallback);
+  const draft = $derived(current.state);
   let composing = $state(false);
   let input: HTMLTextAreaElement | undefined = $state();
 
   async function send() {
     if (composing || disabled) return;
-    if (await save()) input?.focus();
+    if (await current.send()) input?.focus();
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -22,7 +24,7 @@
 <form onsubmit={(event) => { event.preventDefault(); void send(); }}>
   <label for="message-input">Nachricht</label>
   <textarea id="message-input" bind:this={input} value={$draft.text} rows="3"
-    oninput={(event) => setText(event.currentTarget.value)}
+    oninput={(event) => current.setText(event.currentTarget.value)}
     placeholder="Nachricht schreiben …" aria-describedby="message-hint"
     onkeydown={handleKeydown}
     oncompositionstart={() => { composing = true; }}

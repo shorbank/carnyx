@@ -16,6 +16,10 @@ const CREATE_MESSAGES: &str = "CREATE TABLE messages_v3 (
 )";
 const CREATE_INDEX: &str =
     "CREATE INDEX idx_messages_local_time ON messages(COALESCE(received_at, created_at))";
+const CREATE_TRANSPORT_IDENTITY: &str = "CREATE TABLE transport_identity(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), public_key BLOB NOT NULL CHECK(length(public_key)=32))";
+const CREATE_TRUSTED_PEER: &str = "CREATE TABLE trusted_peer(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), peer_id TEXT NOT NULL, public_key BLOB NOT NULL CHECK(length(public_key)=32), address TEXT NOT NULL)";
+const CREATE_PEER_KEYS: &str = "CREATE TABLE peer_keys(peer_id TEXT PRIMARY KEY NOT NULL, public_key BLOB NOT NULL CHECK(length(public_key)=32))";
+const CREATE_DELIVERIES: &str = "CREATE TABLE deliveries(message_id TEXT PRIMARY KEY NOT NULL REFERENCES messages(id) ON DELETE CASCADE, state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')), attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0), acknowledged_at INTEGER, CHECK((state='pending' AND acknowledged_at IS NULL) OR (state='acknowledged' AND acknowledged_at BETWEEN 0 AND 8640000000000000)))";
 
 fn compact(sql: &str) -> String {
     sql.replace('"', "")
@@ -81,7 +85,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, Stor
     // Serialize opening/migration across independent repository connections.
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if !(0..=3).contains(&version) {
+    if !(0..=4).contains(&version) {
         return Err(StorageError::UnsupportedSchemaVersion(version));
     }
     let identity = if version < 3 {
@@ -119,6 +123,22 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, Stor
         "idx_messages_local_time",
         CREATE_INDEX,
     )?;
+    if version < 4 {
+        transaction.execute_batch(CREATE_TRANSPORT_IDENTITY)?;
+        transaction.execute_batch(CREATE_TRUSTED_PEER)?;
+        transaction.execute_batch(CREATE_PEER_KEYS)?;
+        transaction.execute_batch(CREATE_DELIVERIES)?;
+        transaction.execute("INSERT INTO deliveries(message_id,state) SELECT id,'pending' FROM messages WHERE direction='outgoing'", [])?;
+        transaction.execute_batch("PRAGMA user_version = 4")?;
+    }
+    for (name, ddl) in [
+        ("transport_identity", CREATE_TRANSPORT_IDENTITY),
+        ("trusted_peer", CREATE_TRUSTED_PEER),
+        ("peer_keys", CREATE_PEER_KEYS),
+        ("deliveries", CREATE_DELIVERIES),
+    ] {
+        validate_schema_sql(&transaction, "table", name, ddl)?;
+    }
     transaction.commit()?;
     Ok(identity)
 }

@@ -12,7 +12,7 @@ const COLUMNS: &str = "id, text, created_at, sender_id, recipient_id, direction,
 const INSERT: &str = "INSERT INTO messages(id, text, created_at, sender_id, recipient_id, direction, received_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)";
 
 pub struct SqliteMessageRepository {
-    connection: Connection,
+    pub(crate) connection: Connection,
     local_identity: LocalIdentity,
 }
 impl SqliteMessageRepository {
@@ -25,6 +25,7 @@ impl SqliteMessageRepository {
             fs::create_dir_all(parent)?;
         }
         let mut connection = Connection::open(path)?;
+        connection.pragma_update(None, "foreign_keys", true)?;
         let local_identity = migrations::migrate(&mut connection)?;
         Ok(Self {
             connection,
@@ -45,7 +46,7 @@ fn decode_peer(value: String, index: usize) -> rusqlite::Result<PeerId> {
         )
     })
 }
-fn read_message(row: &Row<'_>) -> rusqlite::Result<Message> {
+pub(crate) fn read_message(row: &Row<'_>) -> rusqlite::Result<Message> {
     let sender_id = decode_peer(row.get(3)?, 3)?;
     let recipient_id = row
         .get::<_, Option<String>>(4)?
@@ -85,7 +86,17 @@ fn storage_error(error: rusqlite::Error) -> MessageError {
 
 impl MessageRepository for SqliteMessageRepository {
     fn insert(&mut self, message: &Message) -> Result<(), MessageError> {
-        insert(&self.connection, message, INSERT).map_err(storage_error)?;
+        let transaction = self.connection.transaction().map_err(storage_error)?;
+        insert(&transaction, message, INSERT).map_err(storage_error)?;
+        if message.direction() == Direction::Outgoing {
+            transaction
+                .execute(
+                    "INSERT INTO deliveries(message_id,state) VALUES(?1,'pending')",
+                    params![message.id()],
+                )
+                .map_err(storage_error)?;
+        }
+        transaction.commit().map_err(storage_error)?;
         Ok(())
     }
     fn insert_if_absent(&mut self, message: &Message) -> Result<InsertResult, MessageError> {
@@ -178,7 +189,7 @@ mod tests {
                 .connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            4
         );
     }
 
@@ -212,11 +223,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("messages.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.execute_batch("CREATE TABLE preserved (value TEXT); INSERT INTO preserved VALUES ('keep'); PRAGMA user_version = 4;").unwrap();
+        connection.execute_batch("CREATE TABLE preserved (value TEXT); INSERT INTO preserved VALUES ('keep'); PRAGMA user_version = 5;").unwrap();
         drop(connection);
         assert!(matches!(
             SqliteMessageRepository::open(&path),
-            Err(StorageError::UnsupportedSchemaVersion(4))
+            Err(StorageError::UnsupportedSchemaVersion(5))
         ));
         let connection = Connection::open(&path).unwrap();
         assert_eq!(
@@ -230,7 +241,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            4
+            5
         );
     }
 

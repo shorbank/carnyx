@@ -8,8 +8,10 @@ pub mod incoming_message;
 pub mod message;
 pub mod message_service;
 mod migrations;
+mod peer;
 mod retention;
 mod sqlite_identity;
+mod sqlite_peer;
 pub mod sqlite_repository;
 mod storage_error;
 
@@ -52,6 +54,10 @@ pub fn run() {
             }))?
             .map_err(|error| error as Box<dyn std::error::Error>)?;
         app.manage(state.clone());
+        app.manage(peer::commands::PeerApp::new(
+            app.handle().clone(),
+            state.clone(),
+        ));
         app.manage(retention::RetentionTask::start(app.handle().clone(), state));
         Ok(())
     });
@@ -60,12 +66,22 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::list_messages,
-            commands::send_message
+            commands::send_message,
+            peer::commands::get_peer_setup,
+            peer::commands::create_connection_code,
+            peer::commands::start_peer_session,
+            peer::commands::disconnect_peer,
+            peer::commands::get_peer_state,
+            peer::commands::send_peer_message,
+            peer::commands::list_peer_messages
         ])
         .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(peer) = app.try_state::<peer::commands::PeerApp>() {
+                    tauri::async_runtime::block_on(peer.coordinator.disconnect());
+                }
                 if let Some(task) = app.try_state::<retention::RetentionTask>() {
                     task.stop();
                 }

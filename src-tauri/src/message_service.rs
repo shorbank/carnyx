@@ -25,7 +25,7 @@ pub trait MessageRepository {
 }
 
 pub struct MessageService<R, C = SystemClock> {
-    repository: R,
+    pub(crate) repository: R,
     clock: C,
     local_peer: PeerId,
 }
@@ -60,8 +60,18 @@ impl<R: MessageRepository, C: Clock> MessageService<R, C> {
         recipient: PeerId,
         text: &str,
     ) -> Result<Message, MessageError> {
+        self.create_outgoing_validated(recipient, text, |_| Ok::<_, MessageError>(()))
+    }
+
+    pub fn create_outgoing_validated<E: From<MessageError>>(
+        &mut self,
+        recipient: PeerId,
+        text: &str,
+        validate: impl FnOnce(&Message) -> Result<(), E>,
+    ) -> Result<Message, E> {
         let message =
             Message::outgoing(text, self.clock.now_millis()?, self.local_peer, recipient)?;
+        validate(&message)?;
         self.repository.insert(&message)?;
         Ok(message)
     }
@@ -89,10 +99,15 @@ impl<R: MessageRepository, C: Clock> MessageService<R, C> {
         self.repository.delete_through(self.cutoff()?)
     }
 
-    fn cutoff(&self) -> Result<i64, MessageError> {
+    pub(crate) fn cutoff(&self) -> Result<i64, MessageError> {
         let now = self.clock.now_millis()?;
         crate::message::validate_time(now)?;
         Ok(now - RETENTION_MILLIS)
+    }
+    pub(crate) fn now_millis(&self) -> Result<i64, MessageError> {
+        let now = self.clock.now_millis()?;
+        crate::message::validate_time(now)?;
+        Ok(now)
     }
 }
 

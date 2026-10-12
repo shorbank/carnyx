@@ -75,6 +75,7 @@ pub async fn list_messages(
         Ok(service
             .list_messages()?
             .into_iter()
+            .filter(|message| message.direction() == crate::message::Direction::Local)
             .map(MessageDto::from)
             .collect())
     })

@@ -6,6 +6,8 @@ export interface Message {
   readonly recipientId: string | null;
   readonly direction: "local" | "outgoing" | "incoming";
   readonly receivedAt: number | null;
+  readonly deliveryStatus?: "pending" | "acknowledged" | null;
+  readonly acknowledgedAt?: number | null;
 }
 
 export function messageLocalTime(message: Message): number {
