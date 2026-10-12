@@ -3,7 +3,11 @@ import { test } from 'node:test';
 import { get } from 'svelte/store';
 import { createChatStore } from './chat-store.ts';
 
-const message = (id, createdAt = 1234) => ({ id, text: `Text ${id}`, createdAt });
+const message = (id, createdAt = 1234) => ({
+  id, text: `Text ${id}`, createdAt,
+  senderId: "61f3f556-b896-4b43-bce0-507d166543e8",
+  recipientId: null, direction: "local", receivedAt: null,
+});
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -194,4 +198,14 @@ test('a delayed save confirmation cannot resurrect a message expired during stan
   saving.resolve(message('already-expired'));
   assert.equal(await sent, true);
   assert.deepEqual(f.value().messages, []);
+});
+
+test('appending a local message keeps received history ordered by local receipt time', async () => {
+  const received = { ...message('received', 1), direction: 'incoming', receivedAt: 2000,
+    recipientId: '6b9ab3f5-a0d1-47b8-a224-ae3a03a23d8b' };
+  const f = fixture([received]);
+  await f.chat.start();
+  f.api.sendMessage = async () => message('local', 1999);
+  await f.chat.sendMessage('hello');
+  assert.deepEqual(f.value().messages.map((m) => m.id), ['local', 'received']);
 });

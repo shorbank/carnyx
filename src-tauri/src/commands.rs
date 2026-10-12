@@ -9,6 +9,10 @@ pub struct MessageDto {
     id: String,
     text: String,
     created_at: i64,
+    sender_id: String,
+    recipient_id: Option<String>,
+    direction: &'static str,
+    received_at: Option<i64>,
 }
 
 impl From<Message> for MessageDto {
@@ -17,6 +21,10 @@ impl From<Message> for MessageDto {
             id: message.id().to_owned(),
             text: message.text().to_owned(),
             created_at: message.created_at(),
+            sender_id: message.sender_id().to_string(),
+            recipient_id: message.recipient_id().map(|peer| peer.to_string()),
+            direction: message.direction().as_str(),
+            received_at: message.received_at(),
         }
     }
 }
@@ -33,6 +41,12 @@ impl From<MessageError> for CommandError {
             code: match error {
                 MessageError::EmptyText => "empty_text",
                 MessageError::InvalidSystemTime => "invalid_time",
+                MessageError::InvalidPeerId => "invalid_peer",
+                MessageError::InvalidMessageId => "invalid_message_id",
+                MessageError::UnexpectedSender => "unexpected_sender",
+                MessageError::InvalidRecipient => "invalid_recipient",
+                MessageError::InvalidMetadata => "invalid_metadata",
+                MessageError::MessageConflict => "message_conflict",
                 MessageError::Storage(_) => "storage_error",
             },
         }
@@ -85,9 +99,14 @@ mod tests {
     use super::*;
     #[test]
     fn serializes_message_and_sanitizes_storage_errors() {
-        let dto = MessageDto::from(Message::new("Hallo", 1234).unwrap());
+        let own = crate::identity::PeerId::generate();
+        let dto = MessageDto::from(Message::local("Hallo", 1234, own).unwrap());
         let json = serde_json::to_value(dto).unwrap();
         assert_eq!(json["createdAt"], 1234);
+        assert_eq!(json["senderId"], own.to_string());
+        assert_eq!(json["direction"], "local");
+        assert_eq!(json["recipientId"], serde_json::Value::Null);
+        assert_eq!(json["receivedAt"], serde_json::Value::Null);
         assert!(json.get("created_at").is_none());
         let error = CommandError::from(MessageError::Storage(Box::new(std::io::Error::other(
             "private path",
@@ -170,7 +189,7 @@ mod tests {
         let path = directory.path().join("messages.sqlite");
         let mut repository =
             crate::sqlite_repository::SqliteMessageRepository::open(&path).unwrap();
-        let old = Message::new("old", 0).unwrap();
+        let old = Message::local("old", 0, repository.local_identity().peer_id()).unwrap();
         repository.insert(&old).unwrap();
         drop(repository);
         let app = app(&path);

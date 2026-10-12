@@ -1,6 +1,7 @@
 import { get, writable, type Readable } from "svelte/store";
 import type { ChatApi } from "./chat-api";
 import type { Message } from "./message";
+import { messageLocalTime } from "./message.ts";
 
 export interface ChatIssue {
   operation: "load" | "send" | "connection";
@@ -121,7 +122,7 @@ export function createChatStore(api: ChatApi): ChatStore {
         revision++;
         state.update((value) => ({ ...value,
           messages: value.messages.some((existing) => existing.id === message.id) ? value.messages :
-            [...value.messages, message].sort((a, b) => a.createdAt - b.createdAt) }));
+            [...value.messages, message].sort((a, b) => messageLocalTime(a) - messageLocalTime(b)) }));
         return true;
       } catch (error) {
         if (!disposed) state.update((value) => ({ ...value, error: issue(error, "send") }));

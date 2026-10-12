@@ -3,10 +3,15 @@ use tauri::Manager;
 mod chat_state;
 pub mod clock;
 mod commands;
+pub mod identity;
+pub mod incoming_message;
 pub mod message;
 pub mod message_service;
+mod migrations;
 mod retention;
+mod sqlite_identity;
 pub mod sqlite_repository;
+mod storage_error;
 
 #[cfg(target_os = "macos")]
 mod startup_lock;

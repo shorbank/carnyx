@@ -52,8 +52,10 @@ npm run build
 
 Startup opens `messages.sqlite` in Tauri's application data directory and keeps a
 message service in managed application state. On first use, a transaction creates
-schema version 2: `messages(id, text, created_at)` with an index on `created_at`.
-Version 1 databases are migrated transactionally without losing messages. Unknown
+schema version 3: `messages(id, text, created_at, sender_id, recipient_id, direction,
+received_at)` and a singleton `local_identity` record. Version 1 and 2 databases are
+migrated transactionally: existing IDs, text, timestamps and insertion order are
+preserved, and existing messages become local messages from the app's own identity. Unknown
 versions, damaged schemas and initialization errors stop startup; databases are
 never reset. SQLite reuses freed pages; no periodic VACUUM shrinks the file.
 
@@ -62,11 +64,20 @@ The modules in `src-tauri/src/` have separate responsibilities:
 - `message`: trims outer whitespace, rejects empty text, and creates UUID-v4 IDs.
   Inner whitespace and Unicode are preserved. `clock` supplies Unix milliseconds
   and can be replaced in tests.
+- `identity`: typed UUID-v4 peer IDs and a stable local app identity. `sqlite_identity`
+  persists it independently of message retention. A missing or invalid identity in
+  an existing version 3 database stops startup instead of silently replacing it.
+- `incoming_message`: validates untrusted message metadata separately from storage,
+  including the source peer, sender, recipient, UUID and timestamp.
 - `message_service`: creates and stores a message through a repository interface,
   returning success only after storage succeeds. It also owns the 24-hour cutoff:
   messages expire at exactly 24 hours and are excluded immediately from reads.
-- `sqlite_repository`: owns the SQLite connection, schema initialization, parameterized
-  inserts, ordered reads, and transacted deletion. SQLite is bundled through `rusqlite`.
+  Separate internal paths create targeted outgoing messages and receive messages
+  idempotently; they do not send data over a network.
+- `sqlite_repository`: owns the SQLite connection, parameterized inserts, atomic
+  insert-if-absent, ordered reads, and transacted deletion. `migrations` owns schema
+  validation and transactional upgrades; `storage_error` describes storage failures.
+  SQLite is bundled through `rusqlite`.
 - `chat_state`: owns shared service access on blocking workers; locks never cross awaits.
 - `commands`: thin `list_messages` and `send_message` adapters with camelCase DTOs
   and sanitized error codes. The frontend adapter isolates Tauri calls from the store.
@@ -76,11 +87,29 @@ The modules in `src-tauri/src/` have separate responsibilities:
 The store subscribes before loading and rejects outdated snapshots when sends or
 expiry events intervene. Draft revisions prevent delayed saves from clearing newer
 edits. The UI follows new messages near the bottom and anchors the reading position
-when older messages disappear. Sender and recipient fields remain deferred until
-peer identities are introduced.
+when older messages disappear. The existing chat still creates only `local` messages
+with its own sender ID and no recipient. DTOs expose `senderId`, `recipientId`,
+`direction` and `receivedAt` alongside the existing fields; there are no new commands
+or receive events, peer selection controls or changes to message appearance.
+
+Incoming messages retain the sender's ID and creation time, but receive a separate
+local receipt time. Ordering, display and 24-hour retention use receipt time when
+present, otherwise creation time, with insertion order breaking timestamp ties.
+An expression index supports this local-time query. An identical incoming message
+returns the stored message without changing its receipt time. A reused ID with
+different content is rejected; stored rows are never overwritten. This duplicate
+protection lasts while the row exists: after retention removes it, the ID can be
+accepted again. No permanent replay ledger is kept.
+
+The local UUID identifies this database, not an authenticated device. It survives
+message cleanup and app restarts; deleting the database creates a new identity.
+Keys, authentication, discovery, transport, delivery acknowledgements and incoming
+UI notifications remain future work. The receive API's source peer must eventually
+come from the transport's verified connection rather than the message payload.
 
 Rust tests use temporary directories and a controllable clock, covering migrations,
-reopening, boundary cases, failures, actual commands with Tauri's mock runtime, and
+reopening, identity stability, incoming validation, duplicate/conflict handling,
+concurrent insertions, boundary cases, failures, actual commands with Tauri's mock runtime, and
 the cleanup event/shutdown lifecycle. Frontend tests use controlled adapter promises
 to verify races and draft preservation. Run Rust checks from `src-tauri`:
 
@@ -110,7 +139,8 @@ npm run tauri build -- --debug --bundles app
 
 - [x] Set up a local embedded database (`rusqlite`) in the application data directory
 - [x] Implement the initial local message schema (`id`, `text`, `created_at`)
-- [ ] Add sender and recipient fields when peer identities are introduced
+- [x] Add persistent peer identity, sender/recipient metadata and local/outgoing/incoming directions
+- [x] Prepare validated, idempotent incoming message storage without adding transport
 - [x] Purge expired messages at startup and every 60 seconds; update the open chat
 - [x] Connect the local chat to Rust through Tauri Commands for loading and storing messages
 

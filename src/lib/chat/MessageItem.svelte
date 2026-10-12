@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Message } from "./message";
+  import { messageLocalTime } from "./message";
   import { formatMessageTime } from "./message-time";
 
   let { message }: { message: Message } = $props();
@@ -7,8 +8,8 @@
 
 <li data-message-id={message.id}>
   <p>{message.text}</p>
-  <time datetime={new Date(message.createdAt).toISOString()}>
-    {formatMessageTime(message.createdAt)}
+  <time datetime={new Date(messageLocalTime(message)).toISOString()}>
+    {formatMessageTime(messageLocalTime(message))}
   </time>
 </li>
 
