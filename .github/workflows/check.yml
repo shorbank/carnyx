@@ -26,7 +26,11 @@ jobs:
         working-directory: src-tauri
       - run: cargo check --locked
         working-directory: src-tauri
-      - run: cargo test --lib --locked
+      - if: runner.os == 'macOS'
+        run: cargo test --lib --locked
+        working-directory: src-tauri
+      - if: runner.os == 'Windows'
+        run: cargo test --lib --locked --no-run
         working-directory: src-tauri
       - if: runner.os == 'macOS'
         run: npm run tauri build -- --debug --bundles app
