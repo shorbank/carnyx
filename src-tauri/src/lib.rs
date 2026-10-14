@@ -70,6 +70,7 @@ pub fn run() {
             peer::commands::get_peer_setup,
             peer::commands::create_connection_code,
             peer::commands::start_peer_session,
+            peer::commands::reconnect_peer,
             peer::commands::disconnect_peer,
             peer::commands::get_peer_state,
             peer::commands::send_peer_message,

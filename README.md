@@ -70,8 +70,8 @@ npm run build
 
 Startup opens `messages.sqlite` in Tauri's application data directory and keeps a
 message service in managed application state. On first use, a transaction creates
-schema version 4: `messages(id, text, created_at, sender_id, recipient_id, direction,
-received_at)` and a singleton `local_identity` record. Version 1, 2 and 3 databases are
+schema version 5: `messages(id, text, created_at, sender_id, recipient_id, direction,
+received_at)` and a singleton `local_identity` record. Version 1, 2, 3 and 4 databases are
 migrated transactionally: existing IDs, text, timestamps and insertion order are
 preserved. Version 1 and 2 messages become local messages from the app's own identity;
 version 3 retains its existing directions and peer metadata. Unknown
@@ -151,7 +151,9 @@ npm run tauri build -- --debug --bundles app
 
 Peer chat is supported on macOS and Windows. The **Lokal / Peer** switch separates
 local history from the selected peer conversation and preserves each draft in memory.
-Opening connection setup initializes a persistent X25519 key. Its private half lives
+Startup reads saved peer information and local network addresses without accessing
+the secret store or opening sockets. Showing a connection code or starting a session
+initializes a persistent X25519 key. Its private half lives
 in macOS Keychain or Windows Credential Manager; SQLite stores only public keys.
 Missing or mismatched keys are never silently replaced. Key-store errors leave the
 local chat available. This does not encrypt the SQLite message file itself.
@@ -162,7 +164,8 @@ To connect two computers on the same network:
    each computer's LAN IPv4 address and a port (default `32147`). Choose
    **Eigenen Code anzeigen**.
 2. Exchange these public connection codes through a trusted channel and paste the
-   other's code on each computer. Codes contain the UUID, public key, address and port;
+   other's code on each computer. Use **Code kopieren**, or mark and copy the code if automatic copying is unavailable.
+   Codes contain the UUID, public key, address and port;
    they contain no private key. Do not accept codes from an untrusted source.
 3. Choose **Auf Peer warten** on one computer and **Verbinden** on the other. Both
    codes must refer to the addresses and ports chosen in setup. The firewall must
@@ -170,6 +173,28 @@ To connect two computers on the same network:
 4. Select **Peer** after setup. New peer messages require **Verschlüsselt verbunden**.
    **Verbindung trennen** stops the listener, reconnection and retries. Choosing the local view
    keeps an active peer connection running.
+
+After a restart, the **Peer** tab restores the selected peer and its history without
+requiring setup to be opened. **Erneut verbinden** reuses the saved local IPv4 address,
+port and role: one device waits and the other connects. Both devices must start their
+session explicitly; choosing a tab never connects automatically. **Einrichtung ändern**
+opens the existing code-exchange form. Edited endpoint settings and drafts survive
+refreshes and tab switches.
+
+Schema 5 adds `peer_session_settings`, linked by peer ID to the selected peer. Peer
+selection, public-key pinning and session settings commit together before the
+coordinator starts. These are the last validated requested settings, not a record of
+successful authentication; a failed connection or occupied listener port leaves them
+available for retry. Storage failures prevent startup of the session. Schema 4 users
+retain their peer and messages but must complete setup once because the old database
+contains no local endpoint or role. Migration failures never reset the database.
+
+If the saved local address is no longer on this computer, it stays visible and
+reconnection is disabled. Choose the new address in **Netzwerkdetails** and exchange
+new codes. Changed ports also require updating the codes. A timeout cannot establish
+whether the remote address changed: check the network and update codes if necessary.
+New addresses for the same UUID keep the existing public-key pin; changed keys are
+still rejected. No key rotation or automatic address replacement is performed.
 
 `peer/transport` owns TCP framing and `Noise_XX_25519_ChaChaPoly_BLAKE2s` through
 `snow`. Both static keys are checked against exchanged codes, then both peers send
@@ -193,7 +218,7 @@ Each direction has one message awaiting an ACK. After ten seconds without an ACK
 retries wait 1, 2, 4, 8, 16, then 30 seconds, always preserving ID and content. During
 an explicitly started session, network interruptions trigger reconnection with the
 same backoff. Verbindung trennen and app exit stop attempts. App restart does not open any sockets
-or reconnect: reconnect manually to resume still-valid pending deliveries. No new
+or reconnect: choose **Erneut verbinden** to resume still-valid pending deliveries. No new
 peer messages are accepted offline. Retries stop at exactly 24 hours; cleanup deletes
 delivery metadata with the message. SQLite reuses freed pages without periodic VACUUM.
 
@@ -212,7 +237,12 @@ message components/store own display and editable drafts.
 
 Validation includes two real loopback coordinators with separate temporary databases,
 lost ACKs, bidirectional delivery, reconnects, wrong keys/identities, malformed frames,
-migrations, exact retention boundaries, and store races. The CI workflow builds and
+migrations, exact retention boundaries, and store races. Tests also cover read-only setup without secret-store calls, both saved roles after
+full app-state recreation, resumed delivery with the original ID, migration rollback,
+atomic profile writes, missing addresses, duplicate actions, stale snapshots and
+clipboard failure. The compact reconnect UI was checked with isolated browser fixtures.
+Native two-device reconnect acceptance on macOS and Windows remains pending.
+The CI workflow builds and
 tests on macOS and Windows. Local macOS acceptance used two native apps with isolated
 databases and test credentials: encrypted bidirectional messages, Enter/Shift+Enter,
 button/focus behavior, separate histories/drafts, sender and receiver storage failures,

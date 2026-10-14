@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ConnectionState } from "./connection-store";
   import type { ConnectionSetup } from "./connection-setup";
+  import SavedPeerActions from "./SavedPeerActions.svelte";
   import Field from "../ui/Field.svelte";
   import Disclosure from "../ui/Disclosure.svelte";
   import StatusNotice from "../ui/StatusNotice.svelte";
@@ -14,21 +15,25 @@
 <div class="connection-view">
   <div class="intro"><h1>Verbindung</h1><p>Direkt miteinander schreiben.</p></div>
   <StatusNotice text={connectionLabels[connection.connection.phase]} />
-  {#if connection.error || connection.connection.error || $form.validation}
-    <StatusNotice error text={$form.validation ?? connection.error ?? peerError(connection.connection.error)} />
+  {#if connection.error || connection.setupError || connection.connection.error || $form.validation}
+    <StatusNotice error text={$form.validation ?? connection.error ?? connection.setupError ?? peerError(connection.connection.error)}>{#if connection.setupError}<button type="button" disabled={connection.busy || $form.loading} onclick={() => { void controller.load(true); }}>Einrichtung erneut laden</button>{/if}</StatusNotice>
   {/if}
   {#if !connection.setup}
-    <p class="hint">Die Einrichtung lädt deine Netzwerkadressen und den sicheren Geräteschlüssel.</p>
+    <p class="hint">Die Einrichtung lädt deine gespeicherte Verbindung und die verfügbaren Netzwerkadressen.</p>
     <button type="button" disabled={$form.loading} onclick={() => { void controller.load(true); }}>{$form.loading ? "Einrichtung wird geladen …" : "Einrichtung erneut laden"}</button>
   {:else}
     {#if active}
       <section class="step"><h2>Verbindung läuft</h2><p class="hint">Du kannst zum Chat wechseln. Die Verbindung bleibt dabei aktiv.</p><button type="button" disabled={connection.busy} onclick={() => { void controller.disconnect(); }}>Verbindung trennen</button></section>
     {:else}
+      {#if connection.setup.selectedPeer}
+        <SavedPeerActions peer={connection.setup.selectedPeer} roleLabel={$form.roleLabel} canReconnect={$form.canReconnect} hint={$form.reconnectHint} busy={connection.busy || $form.loading} onreconnect={() => { void controller.reconnect(); }} onedit={controller.edit} />
+      {/if}
+      {#if $form.showEditor}
       <section class="step">
         <h2><span class="step-number">1</span> Eigenen Code teilen</h2>
         <p class="hint">Tauscht eure Codes über einen vertrauenswürdigen Weg aus.</p>
         <button type="button" disabled={locked || !$form.address} onclick={() => { void controller.generate(); }}>{connection.busy ? "Bitte warten …" : $form.ownCode ? "Code neu erzeugen" : "Eigenen Code anzeigen"}</button>
-        {#if $form.ownCode}<Field id="own-code" label="Dein Code · markieren und kopieren"><textarea id="own-code" class="code" readonly value={$form.ownCode} rows="3" spellcheck="false"></textarea></Field>{/if}
+        {#if $form.ownCode}<Field id="own-code" label="Dein Verbindungscode"><textarea id="own-code" class="code" readonly value={$form.ownCode} rows="3" spellcheck="false"></textarea></Field><button type="button" onclick={() => { void controller.copyCode(); }}>Code kopieren</button>{#if $form.copyFeedback}<p class="hint" role="status">{$form.copyFeedback}</p>{/if}{/if}
       </section>
       <section class="step">
         <h2><span class="step-number">2</span> Gegenüber hinzufügen</h2>
@@ -36,6 +41,7 @@
         <p class="hint">Einer wartet, der andere verbindet.</p>
         <div class="actions"><button type="button" disabled={locked || !$form.peerCode.trim() || !$form.address} onclick={() => { void controller.connect("responder"); }}>Auf Peer warten</button><button type="button" class="primary" disabled={locked || !$form.peerCode.trim() || !$form.address} onclick={() => { void controller.connect("initiator"); }}>Verbinden</button></div>
       </section>
+      {/if}
     {/if}
     <Disclosure label="Netzwerkdetails">
       <fieldset disabled={locked}><legend>Eigene Netzwerkadresse</legend>
@@ -49,7 +55,7 @@
     </Disclosure>
     <Disclosure label="Weitere Informationen">
       <div class="info"><span>Geräte-ID</span><code>{connection.setup.peerId}</code></div>
-      <div class="info"><span>Öffentlicher Schlüssel</span><code>{connection.setup.publicKey}</code></div>
+      <div class="info"><span>Öffentlicher Schlüssel</span><code>{connection.setup.publicKey ?? "Wird beim Anzeigen eines Codes oder beim Verbinden angelegt."}</code></div>
       <p class="hint">Nachrichten werden lokal gespeichert und nach 24 Stunden entfernt. Die Verbindung ist verschlüsselt; die lokale Nachrichtendatenbank selbst ist nicht verschlüsselt.</p>
       <p class="hint">„Beim Gegenüber gespeichert“ bestätigt die Speicherung, nicht das Lesen.</p>
     </Disclosure>

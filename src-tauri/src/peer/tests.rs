@@ -122,7 +122,7 @@ fn version_three_migration_preserves_identity_messages_and_backfills_pending_del
     let message = service.create_outgoing(peer, "before migration").unwrap();
     drop(service);
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3;").unwrap();
+    connection.execute_batch("DROP TABLE peer_session_settings; DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3;").unwrap();
     drop(connection);
     let repository = SqliteMessageRepository::open(&path).unwrap();
     assert_eq!(repository.local_identity().peer_id(), own);
@@ -150,7 +150,7 @@ fn failed_version_four_upgrade_rolls_back_and_damaged_version_four_is_rejected()
     let path = dir.path().join("messages.sqlite");
     drop(repository);
     let c = rusqlite::Connection::open(&path).unwrap();
-    c.execute_batch("DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3; CREATE TABLE deliveries(broken TEXT);").unwrap();
+    c.execute_batch("DROP TABLE peer_session_settings; DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3; CREATE TABLE deliveries(broken TEXT);").unwrap();
     drop(c);
     assert!(SqliteMessageRepository::open(&path).is_err());
     let c = rusqlite::Connection::open(&path).unwrap();
@@ -526,4 +526,93 @@ async fn two_database_coordinators_retry_lost_ack_resume_after_disconnect_and_st
     let states = ae.states.lock().unwrap();
     assert!(states.iter().any(|s| s.phase == "reconnecting"));
     assert!(states.windows(2).all(|w| w[0].revision < w[1].revision));
+}
+
+#[test]
+fn session_settings_migrate_from_v4_and_persist_atomically_with_pins() {
+    use super::types::{Role, SessionSettings};
+    let (dir, mut repo) = repository();
+    let path = dir.path().join("messages.sqlite");
+    let own = repo.local_identity().peer_id();
+    let peer = Invitation::new(PeerId::generate(), &[1; 32], endpoint(32147));
+    repo.select_peer(&peer).unwrap();
+    let message = MessageService::new(repo, own)
+        .create_outgoing(peer.peer().unwrap(), "preserved")
+        .unwrap();
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch("DROP TABLE peer_session_settings; PRAGMA user_version=4;")
+        .unwrap();
+    drop(c);
+    let mut repo = SqliteMessageRepository::open(&path).unwrap();
+    assert_eq!(repo.local_identity().peer_id(), own);
+    assert_eq!(repo.selected_peer().unwrap(), Some(peer.clone()));
+    assert!(repo.saved_session(peer.peer().unwrap()).unwrap().is_none());
+    assert_eq!(repo.find_by_id(message.id()).unwrap(), Some(message));
+    let settings = SessionSettings {
+        local_address: Ipv4Addr::LOCALHOST,
+        local_port: 32148,
+        role: Role::Responder,
+    };
+    repo.select_session(&peer, &settings).unwrap();
+    drop(repo);
+    let mut repo = SqliteMessageRepository::open(&path).unwrap();
+    assert_eq!(
+        repo.saved_session(peer.peer().unwrap()).unwrap(),
+        Some(settings.clone())
+    );
+    assert!(repo.saved_session(PeerId::generate()).unwrap().is_none());
+    let changed_key = Invitation::new(peer.peer().unwrap(), &[2; 32], endpoint(32149));
+    assert_eq!(
+        repo.select_session(&changed_key, &settings)
+            .unwrap_err()
+            .code,
+        "peer_key_changed"
+    );
+    repo.connection.execute_batch("CREATE TRIGGER fail_settings BEFORE INSERT ON peer_session_settings BEGIN SELECT RAISE(ABORT, 'fail'); END;").unwrap();
+    let other = Invitation::new(PeerId::generate(), &[3; 32], endpoint(32150));
+    assert_eq!(
+        repo.select_session(&other, &settings).unwrap_err().code,
+        "storage_error"
+    );
+    assert_eq!(repo.selected_peer().unwrap(), Some(peer.clone()));
+    assert_eq!(
+        repo.saved_session(peer.peer().unwrap()).unwrap(),
+        Some(settings)
+    );
+    let pins: i64 = repo
+        .connection
+        .query_row(
+            "SELECT count(*) FROM peer_keys WHERE peer_id=?1",
+            [other.peer_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(pins, 0);
+}
+
+#[test]
+fn failed_v5_migration_rolls_back_and_damaged_v5_is_rejected() {
+    let (dir, repo) = repository();
+    let path = dir.path().join("messages.sqlite");
+    drop(repo);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch("DROP TABLE peer_session_settings; CREATE TABLE peer_session_settings(broken TEXT); PRAGMA user_version=4;").unwrap();
+    assert!(SqliteMessageRepository::open(&path).is_err());
+    assert_eq!(
+        c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+    c.execute_batch("DROP TABLE peer_session_settings").unwrap();
+    drop(SqliteMessageRepository::open(&path).unwrap());
+    assert_eq!(
+        c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        5
+    );
+    c.execute_batch(
+        "DROP TABLE peer_session_settings; CREATE TABLE peer_session_settings(broken TEXT)",
+    )
+    .unwrap();
+    assert!(SqliteMessageRepository::open(&path).is_err());
 }

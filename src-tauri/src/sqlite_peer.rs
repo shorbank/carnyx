@@ -5,7 +5,7 @@ use crate::{
         PeerError, Result,
         delivery::{DeliveredMessage, DeliveryRepository, PendingMessage},
         keys::KeyRepository,
-        types::Invitation,
+        types::{Invitation, Role, SessionSettings},
     },
     sqlite_repository::{SqliteMessageRepository, read_message},
 };
@@ -67,7 +67,54 @@ impl KeyRepository for SqliteMessageRepository {
             })
             .transpose()
     }
+    #[cfg(test)]
     fn select_peer(&mut self, peer: &Invitation) -> Result<()> {
+        self.persist_peer(peer, None)
+    }
+}
+
+impl SqliteMessageRepository {
+    pub(crate) fn saved_session(&self, peer: PeerId) -> Result<Option<SessionSettings>> {
+        let value: Option<(String, u16, String)> = self.connection.query_row(
+            "SELECT local_address,local_port,role FROM peer_session_settings WHERE slot=1 AND peer_id=?1",
+            params![peer.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional().map_err(sql)?;
+        value
+            .map(|(address, port, role)| {
+                let role = match role.as_str() {
+                    "initiator" => Role::Initiator,
+                    "responder" => Role::Responder,
+                    _ => return Err(PeerError::new("storage_error", "invalid saved role")),
+                };
+                let settings = SessionSettings {
+                    local_address: address
+                        .parse()
+                        .map_err(|e| PeerError::new("storage_error", e))?,
+                    local_port: port,
+                    role,
+                };
+                settings
+                    .endpoint()
+                    .map_err(|e| PeerError::new("storage_error", e))?;
+                Ok(settings)
+            })
+            .transpose()
+    }
+    pub(crate) fn select_session(
+        &mut self,
+        peer: &Invitation,
+        settings: &SessionSettings,
+    ) -> Result<()> {
+        settings.endpoint()?;
+        self.persist_peer(peer, Some(settings))
+    }
+    fn persist_peer(
+        &mut self,
+        peer: &Invitation,
+        settings: Option<&SessionSettings>,
+    ) -> Result<()> {
+        // Validate the same invitation path for initial setup and stored reconnects.
+        Invitation::decode(&peer.encode())?;
         let transaction = self.connection.transaction().map_err(sql)?;
         let existing: Option<Vec<u8>> = transaction
             .query_row(
@@ -81,10 +128,23 @@ impl KeyRepository for SqliteMessageRepository {
         crate::peer::keys::validate_pin(existing.as_deref(), &key)?;
         transaction.execute("INSERT INTO peer_keys(peer_id,public_key) VALUES(?1,?2) ON CONFLICT(peer_id) DO NOTHING", params![peer.peer_id,key.as_slice()]).map_err(sql)?;
         transaction.execute("INSERT INTO trusted_peer(slot,peer_id,public_key,address) VALUES(1,?1,?2,?3) ON CONFLICT(slot) DO UPDATE SET peer_id=excluded.peer_id,public_key=excluded.public_key,address=excluded.address",params![peer.peer_id,key.as_slice(),peer.address.to_string()]).map_err(sql)?;
+        if let Some(settings) = settings {
+            let role = match settings.role {
+                Role::Initiator => "initiator",
+                Role::Responder => "responder",
+            };
+            transaction.execute("INSERT INTO peer_session_settings(slot,peer_id,local_address,local_port,role) VALUES(1,?1,?2,?3,?4) ON CONFLICT(slot) DO UPDATE SET peer_id=excluded.peer_id,local_address=excluded.local_address,local_port=excluded.local_port,role=excluded.role",
+                params![peer.peer_id, settings.local_address.to_string(), settings.local_port, role]).map_err(sql)?;
+        } else {
+            transaction
+                .execute("DELETE FROM peer_session_settings", [])
+                .map_err(sql)?;
+        }
         transaction.commit().map_err(sql)?;
         Ok(())
     }
 }
+
 const FIELDS: &str =
     "m.id,m.text,m.created_at,m.sender_id,m.recipient_id,m.direction,m.received_at";
 impl DeliveryRepository for SqliteMessageRepository {

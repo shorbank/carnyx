@@ -1,5 +1,6 @@
 import { get, writable } from "svelte/store";
 import type { ChatApi } from "./chat-api";
+import type { ClipboardApi } from "./clipboard-api";
 import type { PeerApi } from "./peer-api";
 import { createChatStore, type ChatStore } from "./chat-store.ts";
 import { createComposerDraft } from "./composer-draft.ts";
@@ -23,12 +24,13 @@ export interface WorkspaceApis {
   local: ChatApi;
   peer: (id: string) => ChatApi;
   connection: PeerApi;
+  clipboard?: ClipboardApi;
 }
 
 /** Owns conversation lifetimes; view components never open network sessions. */
 export function createChatWorkspace(apis: WorkspaceApis) {
   const connection = createConnectionStore(apis.connection);
-  const setup = createConnectionSetup(connection);
+  const setup = createConnectionSetup(connection, apis.clipboard);
   const conversations = new Map<string, Conversation>();
   const started = new Set<string>();
   let disposed = false;
