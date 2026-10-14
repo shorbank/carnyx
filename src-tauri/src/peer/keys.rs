@@ -10,6 +10,7 @@ pub trait KeyRepository {
     fn public_key(&self) -> Result<Option<[u8; 32]>>;
     fn save_public_key(&mut self, key: &[u8; 32]) -> Result<()>;
     fn selected_peer(&self) -> Result<Option<Invitation>>;
+    #[cfg(test)]
     fn select_peer(&mut self, peer: &Invitation) -> Result<()>;
 }
 #[derive(Clone)]

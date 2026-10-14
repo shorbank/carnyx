@@ -9,9 +9,9 @@ function fixture() {
   let callback; let removed=0; let connects=0;
   const api = {
     state: async () => snapshot(0),
-    setup: async () => ({ peerId:'own', publicKey:'public', selectedPeer:null, addresses:['127.0.0.1'] }),
+    setup: async () => ({ peerId:'own', publicKey:'public', selectedPeer:null, session:null, addresses:['127.0.0.1'] }),
     code: async () => 'code',
-    connect: async () => { connects++; }, disconnect: async () => {},
+    connect: async () => { connects++; }, reconnect: async () => {}, disconnect: async () => {},
     subscribe: async (handler) => { callback=handler; return () => removed++; },
   };
   const store=createConnectionStore(api);
@@ -41,11 +41,36 @@ test('parallel actions are blocked and key failures are sanitized', async () => 
 });
 test('overlapping setup responses cannot restore a previously selected peer', async () => {
   const f=fixture();const first=deferred();const second=deferred();let reads=0;f.api.setup=()=>++reads===1?first.promise:second.promise;
-  const old=f.store.setup();const current=f.store.setup();second.resolve({ peerId:'new' });await current;first.resolve({ peerId:'old' });await old;
+  const old=f.store.setup();const current=f.store.setup(true);second.resolve({ peerId:'new' });await current;first.resolve({ peerId:'old' });await old;
   assert.equal(f.value().setup.peerId,'new');
 });
 test('focus refresh can recover a failed event subscription without starting a connection', async () => {
   const f=fixture();const original=f.api.subscribe;f.api.subscribe=async()=>{throw {code:'internal_error'};};
   await f.store.start();f.api.subscribe=original;await f.store.refresh();f.emit(snapshot(4,'connected'));
   assert.equal(f.value().connection.phase,'connected');assert.equal(f.connects(),0);f.store.dispose();assert.equal(f.removed(),1);
+});
+
+test('startup restores setup independently of listener failure, without starting a session', async () => {
+  const f = fixture(); f.api.subscribe = async () => { throw { code: 'internal_error' }; };
+  const saved = { peerId: 'own', publicKey: null, addresses: ['127.0.0.1'], selectedPeer: { peerId: 'peer' }, session: { localAddress: '127.0.0.1', localPort: 32147, role: 'responder' } };
+  f.api.setup = async () => saved;
+  await f.store.start();
+  assert.deepEqual(f.value().setup, saved);
+  assert.equal(f.value().setupStatus, 'ready'); assert.equal(f.connects(), 0);
+  f.store.dispose();
+});
+test('reconnect blocks duplicate actions and discards snapshots from before a failed mutation', async () => {
+  const f = fixture(); await f.store.start();
+  const old = deferred(); const pending = deferred(); let calls = 0;
+  const setup = f.api.setup; f.api.setup = () => old.promise;
+  const refresh = f.store.setup(true);
+  f.api.reconnect = () => { calls++; return pending.promise; };
+  const reconnect = f.store.reconnect();
+  await f.store.reconnect(); assert.equal(calls, 1); assert.equal(f.value().busy, true);
+  f.api.setup = async () => ({ ...(await setup()), selectedPeer: { peerId: 'new' } });
+  pending.reject({ code: 'network_error' }); await reconnect;
+  old.resolve({ selectedPeer: { peerId: 'old' } }); await refresh;
+  assert.equal(f.value().setup.selectedPeer.peerId, 'new');
+  assert.match(f.value().error, /nicht erreichbar/); assert.equal(f.value().busy, false);
+  f.store.dispose();
 });

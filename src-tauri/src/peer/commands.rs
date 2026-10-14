@@ -5,7 +5,7 @@ use super::{
     delivery::PendingMessage,
     keys::{KeyRepository, Keys, OsSecretStore, SecretStore, restore_keys},
     protocol::{Frame, WireMessage},
-    types::{Invitation, PeerState, Role, local_addresses, local_endpoint},
+    types::{Invitation, PeerState, Role, SessionSettings, local_addresses, local_endpoint},
 };
 use crate::{
     chat_state::ChatState,
@@ -105,6 +105,80 @@ impl PeerApp {
             .await
             .cloned()
     }
+    async fn read_setup(&self) -> Result<Setup> {
+        // Interface enumeration and secure-store calls never hold the chat lock.
+        let addresses = tokio::task::spawn_blocking(local_addresses)
+            .await
+            .map_err(|e| PeerError::new("internal_error", e))??;
+        self.work(move |s| {
+            let own = s.local_peer_id();
+            let selected_peer = s.repository.selected_peer()?;
+            let session = selected_peer
+                .as_ref()
+                .map(|peer| s.repository.saved_session(peer.peer()?))
+                .transpose()?
+                .flatten();
+            let address = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 32147);
+            Ok(Setup {
+                peer_id: own.to_string(),
+                public_key: s
+                    .repository
+                    .public_key()?
+                    .map(|key| Invitation::new(own, &key, address).public_key),
+                selected_peer,
+                session,
+                addresses,
+            })
+        })
+        .await
+    }
+    async fn begin_session(&self, peer: Invitation, settings: SessionSettings) -> Result<()> {
+        if self.coordinator.state().phase != "disconnected" {
+            return Err(PeerError::new(
+                "session_active",
+                "disconnect before selecting peer",
+            ));
+        }
+        let copy = settings.clone();
+        let endpoint = tokio::task::spawn_blocking(move || {
+            local_endpoint(&copy.local_address.to_string(), copy.local_port)
+        })
+        .await
+        .map_err(|e| PeerError::new("internal_error", e))??;
+        let own = self.work(|s| Ok(s.local_peer_id())).await?;
+        if peer.peer()? == own {
+            return Err(PeerError::new("invalid_code", "cannot connect to self"));
+        }
+        let (_, keys) = self.keys().await?;
+        let copy = peer.clone();
+        let saved = settings.clone();
+        self.work(move |s| s.repository.select_session(&copy, &saved))
+            .await?;
+        self.coordinator
+            .start(keys, own, peer, settings.role, endpoint)
+            .await
+    }
+    async fn connect(&self, code: &str, settings: SessionSettings) -> Result<()> {
+        let _guard = self.operation.lock().await;
+        self.begin_session(Invitation::decode(code)?, settings)
+            .await
+    }
+    async fn reconnect(&self) -> Result<()> {
+        let _guard = self.operation.lock().await;
+        let (peer, settings) = self
+            .work(|s| {
+                let peer = s
+                    .repository
+                    .selected_peer()?
+                    .ok_or_else(|| PeerError::new("peer_missing", "no saved peer"))?;
+                let settings = s.repository.saved_session(peer.peer()?)?.ok_or_else(|| {
+                    PeerError::new("session_missing", "no saved session settings")
+                })?;
+                Ok((peer, settings))
+            })
+            .await?;
+        self.begin_session(peer, settings).await
+    }
     async fn work<T: Send + 'static>(
         &self,
         op: impl FnOnce(&mut MessageService<SqliteMessageRepository>) -> Result<T> + Send + 'static,
@@ -129,7 +203,8 @@ impl From<PeerError> for IpcError {
 #[serde(rename_all = "camelCase")]
 pub struct Setup {
     peer_id: String,
-    public_key: String,
+    public_key: Option<String>,
+    session: Option<SessionSettings>,
     selected_peer: Option<Invitation>,
     addresses: Vec<std::net::Ipv4Addr>,
 }
@@ -163,20 +238,7 @@ impl From<super::delivery::DeliveredMessage> for PeerMessageDto {
 pub async fn get_peer_setup(
     state: tauri::State<'_, PeerApp>,
 ) -> std::result::Result<Setup, IpcError> {
-    let _guard = state.operation.lock().await;
-    let (peer, keys) = state.keys().await?;
-    state
-        .work(move |s| {
-            let address = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 32147);
-            Ok(Setup {
-                peer_id: peer.to_string(),
-                public_key: Invitation::new(peer, &keys.public, address).public_key,
-                selected_peer: s.repository.selected_peer()?,
-                addresses: local_addresses()?,
-            })
-        })
-        .await
-        .map_err(Into::into)
+    state.read_setup().await.map_err(Into::into)
 }
 #[tauri::command]
 pub async fn create_connection_code(
@@ -185,14 +247,11 @@ pub async fn create_connection_code(
     state: tauri::State<'_, PeerApp>,
 ) -> std::result::Result<String, IpcError> {
     let _guard = state.operation.lock().await;
-    let (own, keys) = state.keys().await?;
-    state
-        .work(move |_| {
-            let endpoint = local_endpoint(&address, port)?;
-            Ok(Invitation::new(own, &keys.public, endpoint).encode())
-        })
+    let endpoint = tokio::task::spawn_blocking(move || local_endpoint(&address, port))
         .await
-        .map_err(Into::into)
+        .map_err(|e| PeerError::new("internal_error", e))??;
+    let (own, keys) = state.keys().await?;
+    Ok(Invitation::new(own, &keys.public, endpoint).encode())
 }
 #[tauri::command]
 pub async fn start_peer_session(
@@ -202,28 +261,24 @@ pub async fn start_peer_session(
     port: u16,
     state: tauri::State<'_, PeerApp>,
 ) -> std::result::Result<(), IpcError> {
-    let _guard = state.operation.lock().await;
-    if state.coordinator.state().phase != "disconnected" {
-        return Err(PeerError::new("session_active", "disconnect before selecting peer").into());
-    }
-    let peer = Invitation::decode(&code)?;
-    let copy = peer.clone();
-    let (own, keys) = state.keys().await?;
-    let endpoint = state
-        .work(move |s| {
-            if copy.peer()? == own {
-                return Err(PeerError::new("invalid_code", "cannot connect to self"));
-            }
-            let endpoint = local_endpoint(&address, port)?;
-            s.repository.select_peer(&copy)?;
-            Ok(endpoint)
-        })
-        .await?;
+    let local_address = address
+        .parse()
+        .map_err(|e| IpcError::from(PeerError::new("invalid_address", e)))?;
     state
-        .coordinator
-        .start(keys, own, peer, role, endpoint)
+        .connect(
+            &code,
+            SessionSettings {
+                local_address,
+                local_port: port,
+                role,
+            },
+        )
         .await
         .map_err(Into::into)
+}
+#[tauri::command]
+pub async fn reconnect_peer(state: tauri::State<'_, PeerApp>) -> std::result::Result<(), IpcError> {
+    state.reconnect().await.map_err(Into::into)
 }
 #[tauri::command]
 pub async fn disconnect_peer(
@@ -354,5 +409,209 @@ mod tests {
         assert_eq!(first.1.public, second.1.public);
         assert_eq!(secrets.reads.load(Ordering::SeqCst), 1);
         assert_eq!(app.coordinator.state().phase, "disconnected");
+    }
+    #[derive(Default)]
+    struct MemorySecrets {
+        values: std::sync::Mutex<std::collections::HashMap<PeerId, Vec<u8>>>,
+        reads: AtomicUsize,
+    }
+    impl SecretStore for MemorySecrets {
+        fn load(&self, peer: PeerId) -> Result<Option<Vec<u8>>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.values.lock().unwrap().get(&peer).cloned())
+        }
+        fn save(&self, peer: PeerId, key: &[u8]) -> Result<()> {
+            self.values.lock().unwrap().insert(peer, key.to_vec());
+            Ok(())
+        }
+    }
+    fn app(path: &std::path::Path, secrets: Arc<MemorySecrets>) -> PeerApp {
+        let database = Arc::new(Database(crate::chat_state::initialize(path).unwrap()));
+        let events = Arc::new(NoEvents);
+        PeerApp {
+            coordinator: Coordinator::new(database.clone(), events.clone()),
+            database,
+            secrets,
+            events,
+            operation: tokio::sync::Mutex::new(()),
+            keys: tokio::sync::OnceCell::new(),
+        }
+    }
+    fn settings(port: u16, role: Role) -> SessionSettings {
+        SessionSettings {
+            local_address: std::net::Ipv4Addr::LOCALHOST,
+            local_port: port,
+            role,
+        }
+    }
+    async fn free_port() -> u16 {
+        tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+    async fn connected(a: &PeerApp, b: &PeerApp) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while a.coordinator.state().phase != "connected"
+                || b.coordinator.state().phase != "connected"
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn setup_is_read_only_and_reconnect_validates_before_accessing_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let app = app(&dir.path().join("messages.sqlite"), secrets.clone());
+        let setup = app.read_setup().await.unwrap();
+        assert!(setup.public_key.is_none());
+        assert!(setup.selected_peer.is_none());
+        assert!(setup.session.is_none());
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(app.coordinator.state().phase, "disconnected");
+        assert_eq!(app.reconnect().await.unwrap_err().code, "peer_missing");
+        let peer = Invitation::new(
+            PeerId::generate(),
+            &[1; 32],
+            "127.0.0.1:32147".parse().unwrap(),
+        );
+        let copy = peer.clone();
+        app.work(move |s| s.repository.select_peer(&copy))
+            .await
+            .unwrap();
+        assert_eq!(app.reconnect().await.unwrap_err().code, "session_missing");
+        let unavailable = ["203.0.113.1", "198.51.100.1", "192.0.2.1"]
+            .into_iter()
+            .map(|v| v.parse::<std::net::Ipv4Addr>().unwrap())
+            .find(|ip| !local_addresses().unwrap().contains(ip))
+            .unwrap();
+        app.work(move |s| {
+            s.repository.select_session(
+                &peer,
+                &SessionSettings {
+                    local_address: unavailable,
+                    local_port: 32147,
+                    role: Role::Initiator,
+                },
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(app.reconnect().await.unwrap_err().code, "invalid_address");
+        assert_eq!(secrets.reads.load(Ordering::SeqCst), 0);
+        assert_eq!(app.coordinator.state().phase, "disconnected");
+    }
+    #[tokio::test]
+    async fn occupied_port_preserves_saved_intent_and_failed_storage_never_starts_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(
+            &dir.path().join("messages.sqlite"),
+            Arc::new(MemorySecrets::default()),
+        );
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let settings = settings(listener.local_addr().unwrap().port(), Role::Responder);
+        let peer = Invitation::new(
+            PeerId::generate(),
+            &[1; 32],
+            "127.0.0.1:32147".parse().unwrap(),
+        );
+        assert_eq!(
+            app.connect(&peer.encode(), settings.clone())
+                .await
+                .unwrap_err()
+                .code,
+            "network_error"
+        );
+        assert_eq!(
+            app.read_setup().await.unwrap().session,
+            Some(settings.clone())
+        );
+        assert_eq!(app.reconnect().await.unwrap_err().code, "network_error");
+        drop(listener);
+        app.work(|s| { s.repository.connection.execute_batch("CREATE TRIGGER fail_settings BEFORE INSERT ON peer_session_settings BEGIN SELECT RAISE(ABORT,'fail'); END;").map_err(|e| PeerError::new("storage_error", e))?; Ok(()) }).await.unwrap();
+        assert_eq!(
+            app.connect(&peer.encode(), settings)
+                .await
+                .unwrap_err()
+                .code,
+            "storage_error"
+        );
+        assert_eq!(app.coordinator.state().phase, "disconnected");
+    }
+    #[tokio::test]
+    async fn both_roles_reconnect_after_full_restart_and_resume_original_pending_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let apath = dir.path().join("a.sqlite");
+        let bpath = dir.path().join("b.sqlite");
+        let asecrets = Arc::new(MemorySecrets::default());
+        let bsecrets = Arc::new(MemorySecrets::default());
+        let a = app(&apath, asecrets.clone());
+        let b = app(&bpath, bsecrets.clone());
+        let (aid, ak) = a.keys().await.unwrap();
+        let (bid, bk) = b.keys().await.unwrap();
+        let asettings = settings(free_port().await, Role::Initiator);
+        let bsettings = settings(free_port().await, Role::Responder);
+        let acode = Invitation::new(aid, &ak.public, asettings.endpoint().unwrap()).encode();
+        let bcode = Invitation::new(bid, &bk.public, bsettings.endpoint().unwrap()).encode();
+        b.connect(&acode, bsettings.clone()).await.unwrap();
+        a.connect(&bcode, asettings.clone()).await.unwrap();
+        connected(&a, &b).await;
+        assert_eq!(a.reconnect().await.unwrap_err().code, "session_active");
+        a.coordinator.disconnect().await;
+        b.coordinator.disconnect().await;
+        let original = a
+            .work(move |s| {
+                s.create_outgoing(bid, "resume original")
+                    .map_err(Into::into)
+            })
+            .await
+            .unwrap();
+        drop(a);
+        drop(b);
+        let a = app(&apath, asecrets.clone());
+        let b = app(&bpath, bsecrets.clone());
+        assert_eq!(a.read_setup().await.unwrap().session, Some(asettings));
+        assert_eq!(b.read_setup().await.unwrap().session, Some(bsettings));
+        assert_eq!(a.coordinator.state().phase, "disconnected");
+        assert_eq!(asecrets.reads.load(Ordering::SeqCst), 1);
+        b.reconnect().await.unwrap();
+        a.reconnect().await.unwrap();
+        connected(&a, &b).await;
+        let id = original.id().to_owned();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let acknowledged = a
+                    .work(move |s| {
+                        Ok(s.peer_history(bid)?
+                            .first()
+                            .is_some_and(|m| m.acknowledged_at.is_some()))
+                    })
+                    .await
+                    .unwrap();
+                if acknowledged {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let received = b
+            .work(|s| s.list_messages().map_err(Into::into))
+            .await
+            .unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].id(), id);
+        assert_eq!(received[0].created_at(), original.created_at());
+        assert_eq!(asecrets.reads.load(Ordering::SeqCst), 2);
+        a.coordinator.disconnect().await;
+        b.coordinator.disconnect().await;
     }
 }

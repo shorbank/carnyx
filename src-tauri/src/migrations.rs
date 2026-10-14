@@ -19,6 +19,7 @@ const CREATE_INDEX: &str =
 const CREATE_TRANSPORT_IDENTITY: &str = "CREATE TABLE transport_identity(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), public_key BLOB NOT NULL CHECK(length(public_key)=32))";
 const CREATE_TRUSTED_PEER: &str = "CREATE TABLE trusted_peer(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), peer_id TEXT NOT NULL, public_key BLOB NOT NULL CHECK(length(public_key)=32), address TEXT NOT NULL)";
 const CREATE_PEER_KEYS: &str = "CREATE TABLE peer_keys(peer_id TEXT PRIMARY KEY NOT NULL, public_key BLOB NOT NULL CHECK(length(public_key)=32))";
+const CREATE_SESSION_SETTINGS: &str = "CREATE TABLE peer_session_settings(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), peer_id TEXT NOT NULL, local_address TEXT NOT NULL, local_port INTEGER NOT NULL CHECK(local_port BETWEEN 1 AND 65535), role TEXT NOT NULL CHECK(role IN ('initiator','responder')))";
 const CREATE_DELIVERIES: &str = "CREATE TABLE deliveries(message_id TEXT PRIMARY KEY NOT NULL REFERENCES messages(id) ON DELETE CASCADE, state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')), attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0), acknowledged_at INTEGER, CHECK((state='pending' AND acknowledged_at IS NULL) OR (state='acknowledged' AND acknowledged_at BETWEEN 0 AND 8640000000000000)))";
 
 fn compact(sql: &str) -> String {
@@ -85,7 +86,7 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, Stor
     // Serialize opening/migration across independent repository connections.
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if !(0..=4).contains(&version) {
+    if !(0..=5).contains(&version) {
         return Err(StorageError::UnsupportedSchemaVersion(version));
     }
     let identity = if version < 3 {
@@ -139,6 +140,16 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, Stor
     ] {
         validate_schema_sql(&transaction, "table", name, ddl)?;
     }
+    if version < 5 {
+        transaction.execute_batch(CREATE_SESSION_SETTINGS)?;
+        transaction.execute_batch("PRAGMA user_version = 5")?;
+    }
+    validate_schema_sql(
+        &transaction,
+        "table",
+        "peer_session_settings",
+        CREATE_SESSION_SETTINGS,
+    )?;
     transaction.commit()?;
     Ok(identity)
 }

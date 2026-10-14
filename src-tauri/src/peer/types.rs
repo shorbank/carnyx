@@ -124,3 +124,19 @@ impl Default for PeerState {
         }
     }
 }
+
+/// Local settings are separate from the public invitation exchanged with the peer.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSettings {
+    pub local_address: Ipv4Addr,
+    pub local_port: u16,
+    pub role: Role,
+}
+impl SessionSettings {
+    pub fn endpoint(&self) -> Result<SocketAddrV4> {
+        let endpoint = SocketAddrV4::new(self.local_address, self.local_port);
+        validate_address(endpoint)?;
+        Ok(endpoint)
+    }
+}
