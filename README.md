@@ -8,7 +8,7 @@ A lightweight, transparent desktop overlay chat application built for direct pee
 
 - Desktop Framework: [Tauri v2](https://tauri.app/)
 - Frontend: [SvelteKit](https://svelte.dev/) + [TypeScript](https://www.typescriptlang.org/) + Vite
-- Styling: Tailwind CSS
+- Styling: CSS with shared petrol-green theme tokens
 - Backend / Storage: Rust
 
 ---
@@ -31,7 +31,25 @@ confirmation clears it only if it has not been edited since sending. Failed save
 preserve the current draft and show an error, without automatic resend. Initial
 load failures can be retried. Outside Tauri, the chat shows a desktop-only message
 instead of using temporary replacement storage. The peer view supports one authenticated LAN peer on macOS and Windows. Click-through is not implemented.
-The UI components and per-view chat store live in `src/lib/chat/`.
+The UI uses an opaque, flat petrol-green dark theme with no blur or shadows.
+The **Lokal**, **Peer** and **Verbindung** tabs separate conversations from setup.
+Tabs support arrow keys and Home/End; switching tabs preserves drafts and reading
+positions. Connection setup guides code exchange and keeps network details and
+identity information in expandable sections. Outgoing messages show compact delivery
+icons with hover/focus explanations; these explanations can be dismissed with Escape.
+The composer shows keyboard hints on focus.
+
+The frameless window starts centered at 350 × 500, can be resized from its edges or
+the lower-right grip, and cannot be made smaller than 350 × 500. The header has
+separate minimize and close controls; only its title area moves the window. Size and
+position are not persisted.
+
+Components live in `src/lib/chat/`, shared UI elements and theme tokens in
+`src/lib/ui/`. `chat-workspace.ts` owns conversation and draft lifetimes, tab selection,
+send availability and focus refreshes. `connection-setup.ts` owns endpoint validation,
+setup drafts and endpoint-bound code generation. Both are tested with injected APIs.
+Tauri window actions are isolated in `window-api.ts`; view components do not invoke
+Tauri commands directly.
 
 On desktop, only one Carnyx instance runs at a time. Launching the app again
 shows, restores, and focuses the existing chat window without resetting messages.
@@ -140,8 +158,9 @@ local chat available. This does not encrypt the SQLite message file itself.
 
 To connect two computers on the same network:
 
-1. Open **Verbindung einrichten** on both, select each computer's LAN IPv4 address
-   and a port (default `32147`). Choose **Eigenen Code anzeigen**.
+1. Open the **Verbindung** tab on both computers. In **Netzwerkdetails**, select
+   each computer's LAN IPv4 address and a port (default `32147`). Choose
+   **Eigenen Code anzeigen**.
 2. Exchange these public connection codes through a trusted channel and paste the
    other's code on each computer. Codes contain the UUID, public key, address and port;
    they contain no private key. Do not accept codes from an untrusted source.
@@ -149,7 +168,7 @@ To connect two computers on the same network:
    codes must refer to the addresses and ports chosen in setup. The firewall must
    allow Carnyx at that endpoint; no automatic firewall changes are made.
 4. Select **Peer** after setup. New peer messages require **Verschlüsselt verbunden**.
-   **Trennen** stops the listener, reconnection and retries. Choosing the local view
+   **Verbindung trennen** stops the listener, reconnection and retries. Choosing the local view
    keeps an active peer connection running.
 
 `peer/transport` owns TCP framing and `Noise_XX_25519_ChaChaPoly_BLAKE2s` through
@@ -173,7 +192,7 @@ persisted before UI notification, and cannot restore an expired message.
 Each direction has one message awaiting an ACK. After ten seconds without an ACK,
 retries wait 1, 2, 4, 8, 16, then 30 seconds, always preserving ID and content. During
 an explicitly started session, network interruptions trigger reconnection with the
-same backoff. Trennen and app exit stop attempts. App restart does not open any sockets
+same backoff. Verbindung trennen and app exit stop attempts. App restart does not open any sockets
 or reconnect: reconnect manually to resume still-valid pending deliveries. No new
 peer messages are accepted offline. Retries stop at exactly 24 hours; cleanup deletes
 delivery metadata with the message. SQLite reuses freed pages without periodic VACUUM.
@@ -208,7 +227,7 @@ acceptance remain pending; the added CI workflow has not been executed here.
 
 ### 1. UI and Widget Design (Frontend)
 
-- [ ] Implement a semi-transparent glassmorphism chat UI
+- [x] Implement an opaque, flat petrol-green dark UI with accessible tabs and separate connection setup
 - [ ] Configure window click-through behavior (interact only with the chat window, pass clicks through the transparent background to the desktop)
 - [x] Add message rendering and auto-scroll behavior
 

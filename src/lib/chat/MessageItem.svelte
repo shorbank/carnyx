@@ -2,44 +2,33 @@
   import type { Message } from "./message";
   import { messageLocalTime } from "./message";
   import { formatMessageTime } from "./message-time";
-
+  import Icon from "../ui/Icon.svelte";
   let { message }: { message: Message } = $props();
+  let hovered = $state(false);
+  let focused = $state(false);
+  let dismissed = $state(false);
+  const acknowledged = $derived(message.deliveryStatus === "acknowledged");
+  const delivery = $derived(acknowledged ? "Beim Gegenüber gespeichert" : "Lokal gespeichert · unbestätigt");
 </script>
-
 <li data-message-id={message.id} class:outgoing={message.direction === "outgoing"} class:incoming={message.direction === "incoming"}>
-  <small>{message.direction === "incoming" ? "Empfangen" : message.direction === "outgoing" ? "Du" : "Lokal"}</small>
+  <span class="sr-only">{message.direction === "incoming" ? "Empfangen" : message.direction === "outgoing" ? "Du" : "Lokal"}</span>
   <p>{message.text}</p>
-  <time datetime={new Date(messageLocalTime(message)).toISOString()}>
-    {formatMessageTime(messageLocalTime(message))}
-  </time>
-  {#if message.direction === "outgoing"}
-    <small class="delivery">{message.deliveryStatus === "acknowledged" ? "Beim Gegenüber gespeichert" : "Lokal gespeichert · unbestätigt"}</small>
-  {/if}
+  <div class="metadata">
+    <time datetime={new Date(messageLocalTime(message)).toISOString()}>{formatMessageTime(messageLocalTime(message))}</time>
+    {#if message.direction === "outgoing"}
+      <button type="button" class="delivery" class:acknowledged aria-label={delivery} title={delivery} onmouseenter={() => { hovered = true; dismissed = false; }} onmouseleave={() => { hovered = false; }} onfocus={() => { focused = true; dismissed = false; }} onblur={() => { focused = false; }} onkeydown={(event) => { if (event.key === "Escape") { dismissed = true; event.preventDefault(); } }}><Icon name={acknowledged ? "check" : "pending"} size={14} /><span class="tooltip" class:shown={(hovered || focused) && !dismissed} aria-hidden="true">{delivery}</span></button>
+    {/if}
+  </div>
 </li>
-
 <style>
-  li {
-    padding: 10px 12px;
-    border-radius: 12px;
-    background: rgba(0, 0, 0, 0.25);
-    user-select: text;
-  }
-  .outgoing { margin-left: 14px; }
-  .incoming { margin-right: 14px; }
-  small { font-size: 0.7rem; opacity: 0.85; }
-  .delivery { display: block; margin-top: 4px; }
-
-  p {
-    margin: 0;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    line-height: 1.4;
-  }
-
-  time {
-    display: block;
-    margin-top: 6px;
-    font-size: 0.75rem;
-    text-align: right;
-  }
+  li { justify-self: start; max-width: 90%; min-width: 60px; padding: 9px 11px 7px; border-radius: 10px; background: var(--surface); user-select: text; }
+  .outgoing { justify-self: end; background: var(--surface-active); }
+  .incoming { border-radius: 10px 10px 10px 3px; }
+  p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+  .metadata { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 4px; color: var(--muted); font-size: 10px; }
+  .delivery { position: relative; display: inline-flex; cursor: help; padding: 0; border: 0; background: transparent; color: inherit; border-radius: 3px; }
+  .delivery:hover { background: transparent; }
+  .acknowledged { color: var(--accent); }
+  .tooltip { display: none; position: absolute; z-index: 1; right: 0; bottom: calc(100% + 6px); width: 180px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--text); font-size: 11px; }
+  .tooltip.shown { display: block; }
 </style>

@@ -1,99 +1,34 @@
 <script lang="ts">
-  import { createComposerDraft } from "./composer-draft";
-  let { onsend, disabled = false, controller }: { onsend: (text: string) => Promise<boolean>; disabled?: boolean; controller?: ReturnType<typeof createComposerDraft> } = $props();
-  const fallback = createComposerDraft((text) => onsend(text));
-  const current = $derived(controller ?? fallback);
-  const draft = $derived(current.state);
+  import type { createComposerDraft } from "./composer-draft";
+  import Icon from "../ui/Icon.svelte";
+  let { disabled = false, disabledReason = "", controller }: { disabled?: boolean; disabledReason?: string; controller: ReturnType<typeof createComposerDraft> } = $props();
+  const draft = $derived(controller.state);
   let composing = $state(false);
   let input: HTMLTextAreaElement | undefined = $state();
-
   async function send() {
     if (composing || disabled) return;
-    if (await current.send()) input?.focus();
+    if (await controller.send()) input?.focus();
   }
-
   function handleKeydown(event: KeyboardEvent) {
-    if (event.key === "Enter" && !event.shiftKey &&
-        !composing && !event.isComposing && event.keyCode !== 229) {
-      event.preventDefault();
-      void send();
+    if (event.key === "Enter" && !event.shiftKey && !composing && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault(); void send();
     }
   }
+  const id = $props.id();
 </script>
-
 <form onsubmit={(event) => { event.preventDefault(); void send(); }}>
-  <label for="message-input">Nachricht</label>
-  <textarea id="message-input" bind:this={input} value={$draft.text} rows="3"
-    oninput={(event) => current.setText(event.currentTarget.value)}
-    placeholder="Nachricht schreiben …" aria-describedby="message-hint"
-    onkeydown={handleKeydown}
-    oncompositionstart={() => { composing = true; }}
-    oncompositionend={() => { composing = false; }}></textarea>
-  <div class="actions">
-    <small id="message-hint">Enter sendet · Shift+Enter: neue Zeile</small>
-    <button type="submit" disabled={disabled || !$draft.text.trim() || composing || $draft.sending}>
-      {$draft.sending ? "Speichert …" : "Senden"}
-    </button>
+  <label class="sr-only" for={id}>Nachricht</label>
+  <div class="input-row">
+    <textarea id={id} bind:this={input} value={$draft.text} rows="2" oninput={(event) => controller.setText(event.currentTarget.value)} placeholder="Nachricht schreiben …" aria-describedby={`${id}-hint`} onkeydown={handleKeydown} oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }}></textarea>
+    <button class="primary send" type="submit" aria-label={$draft.sending ? "Nachricht wird gespeichert" : "Nachricht senden"} title="Nachricht senden" disabled={disabled || !$draft.text.trim() || composing || $draft.sending}><Icon name={$draft.sending ? "pending" : "send"} /></button>
   </div>
+  <small id={`${id}-hint`} class:unavailable={!!disabledReason}>{disabledReason || "Enter sendet · Shift+Enter: neue Zeile"}</small>
 </form>
-
 <style>
-  form {
-    display: grid;
-    gap: 6px;
-    padding: 12px;
-    border-top: 1px solid rgba(255, 255, 255, 0.15);
-  }
-
-  label {
-    font-size: 0.85rem;
-  }
-
-  textarea {
-    box-sizing: border-box;
-    width: 100%;
-    min-width: 0;
-    resize: none;
-    border: 1px solid rgba(255, 255, 255, 0.35);
-    border-radius: 8px;
-    padding: 8px;
-    background: rgba(0, 0, 0, 0.25);
-    color: inherit;
-    font: inherit;
-  }
-
-  textarea::placeholder {
-    color: rgba(255, 255, 255, 0.7);
-  }
-
-  .actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-
-  small {
-    font-size: 0.7rem;
-  }
-
-  button {
-    border: 1px solid rgba(255, 255, 255, 0.35);
-    border-radius: 8px;
-    padding: 8px 10px;
-    background: rgba(0, 0, 0, 0.25);
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-  }
-
-  button:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  textarea:focus-visible, button:focus-visible {
-    outline: 2px solid white;
-    outline-offset: 2px;
-  }
+  form { padding: 10px 16px 18px; border-top: 1px solid var(--border); background: var(--background); }
+  .input-row { display: flex; align-items: flex-end; gap: 8px; }
+  textarea { flex: 1; background: var(--surface); padding: 10px; line-height: 1.5; }
+  .send { display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; padding: 0; border-radius: 8px; margin-bottom: 1px; }
+  small { display: block; height: 0; visibility: hidden; color: var(--muted); font-size: 10px; }
+  form:focus-within small, small.unavailable { height: auto; padding-top: 6px; visibility: visible; }
 </style>

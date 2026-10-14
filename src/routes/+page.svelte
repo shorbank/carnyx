@@ -1,34 +1,11 @@
 <script lang="ts">
-  import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { isTauri } from "@tauri-apps/api/core";
+  import "$lib/ui/theme.css";
   import ChatPanel from "$lib/chat/ChatPanel.svelte";
-
-  async function startDragging(event: PointerEvent) {
-    if (event.button === 0 && isTauri()) {
-      await getCurrentWindow().startDragging();
-    }
-  }
+  import { createChatWorkspace } from "$lib/chat/chat-workspace";
+  import { tauriChatApi } from "$lib/chat/chat-api";
+  import { tauriPeerApi, peerChatApi } from "$lib/chat/peer-api";
+  import { tauriWindowApi } from "$lib/chat/window-api";
+  const workspace = createChatWorkspace({ local: tauriChatApi, peer: peerChatApi, connection: tauriPeerApi });
 </script>
-
-<main class="window">
-  <ChatPanel ondragstart={startDragging} />
-</main>
-
-<style>
-  :global(html),
-  :global(body) {
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    overflow: hidden;
-    font-family: system-ui, sans-serif;
-  }
-
-  .window {
-    display: grid;
-    width: 100%;
-    height: 100%;
-    place-items: center;
-    color: #fff;
-  }
-</style>
+<main><ChatPanel {workspace} windowApi={tauriWindowApi} /></main>
+<style>main { width: 100%; height: 100%; }</style>
