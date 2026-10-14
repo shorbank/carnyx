@@ -16,12 +16,13 @@
         "width": 350,
         "height": 500,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "shadow": false,
         "alwaysOnTop": true,
-        "resizable": false,
-        "x": 1500,
-        "y": 800
+        "resizable": true,
+        "minWidth": 350,
+        "minHeight": 500,
+        "center": true
       }
     ],
     "security": {
