@@ -1,0 +1,3 @@
+# Preserve the original SQLCipher bytes for SHA-256 verification on every platform.
+/src-tauri/vendor/libsqlite3-sys/sqlcipher/*.c text eol=lf
+/src-tauri/vendor/libsqlite3-sys/sqlcipher/*.h text eol=lf
