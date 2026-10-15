@@ -2,8 +2,10 @@
 use super::{DatabaseKey, Result, StorageFailure, connection, integrity, key, plaintext};
 use crate::credentials::Credentials;
 use rusqlite::{Connection, OpenFlags, types::Value};
+#[cfg(unix)]
+use std::fs::File;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -85,14 +87,20 @@ fn compare(original: &Path, encrypted: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn sync(path: &Path) -> Result<()> {
-    File::open(path)
+fn sync_file(path: &Path) -> Result<()> {
+    // Windows FlushFileBuffers (used by sync_all) requires write access.
+    // Open the existing candidate without creating or truncating it.
+    OpenOptions::new()
+        .write(true)
+        .open(path)
         .and_then(|f| f.sync_all())
         .map_err(|_| StorageFailure::MigrationFailed)
 }
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
-    sync(path.parent().ok_or(StorageFailure::MigrationFailed)?)?;
+    File::open(path.parent().ok_or(StorageFailure::MigrationFailed)?)
+        .and_then(|f| f.sync_all())
+        .map_err(|_| StorageFailure::MigrationFailed)?;
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
@@ -183,14 +191,14 @@ fn copy(paths: &Paths, key: &DatabaseKey) -> Result<()> {
     let mut run = run;
     run().map_err(|_| StorageFailure::MigrationFailed)?;
     drop(target);
-    sync(&paths.stage)?;
+    sync_file(&paths.stage)?;
     let mut verified = connection(&paths.stage, key, false)?;
     integrity(&verified)?;
     compare(&paths.main, &verified)?;
     crate::migrations::validate_upgrade(&mut verified)
         .map_err(|_| StorageFailure::MigrationFailed)?;
     drop(verified);
-    sync(&paths.stage)?;
+    sync_file(&paths.stage)?;
     Ok(())
 }
 
