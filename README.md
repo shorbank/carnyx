@@ -1,6 +1,6 @@
 # Carnyx
 
-A lightweight, transparent desktop overlay chat application built for direct peer-to-peer (P2P) communication without relying on a central message-storage server
+A lightweight desktop overlay chat application built for direct peer-to-peer (P2P) communication without relying on a central message-storage server
 
 ---
 
@@ -29,8 +29,7 @@ also refreshes history after standby or missed events.
 Only successfully stored messages are shown. While saving, the input stays editable;
 confirmation clears it only if it has not been edited since sending. Failed saves
 preserve the current draft and show an error, without automatic resend. Initial
-load failures can be retried. Outside Tauri, the chat shows a desktop-only message
-instead of using temporary replacement storage. The peer view supports one authenticated LAN peer on macOS and Windows. Click-through is not implemented.
+load failures can be retried. Outside Tauri, the storage gate stays unavailable; no replacement history is created. The peer view supports one authenticated LAN peer on macOS and Windows. Click-through is not implemented.
 The UI uses an opaque, flat petrol-green dark theme with no blur or shadows.
 The **Lokal**, **Peer** and **Verbindung** tabs separate conversations from setup.
 Tabs support arrow keys and Home/End; switching tabs preserves drafts and reading
@@ -66,6 +65,55 @@ npm run check
 npm run build
 ```
 
+## Encrypted Local History
+
+`messages.sqlite` is encrypted as a whole with SQLCipher 4.19.0 (AES-256 page
+protection and authentication), including message text, identities, peer pins,
+session settings and delivery metadata. A random 32-byte history key lives in
+macOS Keychain or Windows Credential Manager under
+`<app identifier>.history-key.v1` / `messages.sqlite`. It is independent of the
+existing Noise key; its credential service/account remain unchanged. Keys stay in
+Rust, use zeroizing buffers and enter SQLCipher via `sqlite3_key`, never SQL or IPC.
+Journal/WAL page payloads are encrypted; temporary SQL storage stays in memory.
+
+Startup runs on a blocking worker. The UI subscribes to storage status before
+reading its snapshot and only mounts the chat after readiness. OS-store errors,
+missing/wrong keys, damaged data and failed conversion/cleanup show a German error
+with a retry action. No chat, peer or retention services start while blocked.
+No reset, replacement key for ciphertext, or plaintext fallback is available.
+
+On first opening an old plaintext database, Carnyx creates a sibling encrypted
+candidate (`messages.encrypted-pending.sqlite`) and a content-free progress marker
+(`messages.encryption-v1`). It copies ordinary tables/indexes, including hidden
+rowids and `user_version`, then reopens with the persisted key. It checks database
+and foreign-key integrity, compares every row/schema/version, and validates the
+existing schema upgrades in a transaction that is rolled back. Only then does it
+retire the source (`messages.plaintext-retired.sqlite`), promote the candidate, and
+remove the old file and sidecars. Partial copies are recreated from the intact
+source; interruption between the two renames or during cleanup is resumed on retry.
+Ambiguous or corrupt artifacts block startup. Schema 5 and transport DTOs do not
+change. Expiration begins after conversion and cleanup, preserving existing policy.
+The conversion temporarily needs space for another full database.
+
+This protects a copied database, not malware running as the unlocked OS user or
+messages already in app memory. Deleting legacy files cannot securely erase old
+SSD pages, filesystem snapshots or backups. Losing the OS key makes the encrypted
+history unreadable; copying just the database to another machine is insufficient.
+Key backup, password unlocking and rotation are outside this feature.
+
+`credentials.rs` contains the native credential adapter; `encrypted_storage.rs`
+contains key lifecycle and cipher connections; `encrypted_storage/migration.rs`
+contains file conversion/recovery; `storage_bootstrap.rs` controls service startup.
+`src/lib/storage/` separates the typed frontend controller/API from the gate view.
+The native sources, provenance, licenses and reproduction instructions are in
+`src-tauri/vendor/README.md`. macOS uses CommonCrypto; Windows builds static OpenSSL
+and needs MSVC plus Perl. CI verifies source hashes and runs the full Rust tests on
+both desktop platforms, including real encrypted temporary databases, wrong/missing
+keys, old schemas, interrupted phases, cleanup failures, WAL/journal canaries and
+existing peer/reconnect behavior. Native OS-store prompts, Windows execution and
+cross-platform acceptance must be verified on their actual systems; tests use
+injected credentials and never access users' keys or application databases.
+
 ## Rust Message Storage
 
 Startup opens `messages.sqlite` in Tauri's application data directory and keeps a
@@ -96,7 +144,8 @@ The modules in `src-tauri/src/` have separate responsibilities:
 - `sqlite_repository`: owns the SQLite connection, parameterized inserts, atomic
   insert-if-absent, ordered reads, and transacted deletion. `migrations` owns schema
   validation and transactional upgrades; `storage_error` describes storage failures.
-  SQLite is bundled through `rusqlite`.
+  SQLCipher is bundled through `rusqlite`; all production connections pass through
+  `encrypted_storage` before the repository sees them.
 - `chat_state`: owns shared service access on blocking workers; locks never cross awaits.
 - `commands`: thin `list_messages` and `send_message` adapters with camelCase DTOs
   and sanitized error codes. The frontend adapter isolates Tauri calls from the store.

@@ -6,6 +6,7 @@ use crate::{
     migrations,
 };
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+#[cfg(test)]
 use std::{fs, path::Path};
 
 const COLUMNS: &str = "id, text, created_at, sender_id, recipient_id, direction, received_at";
@@ -16,15 +17,15 @@ pub struct SqliteMessageRepository {
     local_identity: LocalIdentity,
 }
 impl SqliteMessageRepository {
+    #[cfg(test)]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref();
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)?;
         }
-        let mut connection = Connection::open(path)?;
+        Self::from_connection(crate::encrypted_storage::test_connection(path)?)
+    }
+    pub(crate) fn from_connection(mut connection: Connection) -> Result<Self, StorageError> {
         connection.pragma_update(None, "foreign_keys", true)?;
         let local_identity = migrations::migrate(&mut connection)?;
         Ok(Self {
@@ -222,14 +223,14 @@ mod tests {
     fn rejects_unknown_versions_without_modifying_existing_data() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("messages.sqlite");
-        let connection = Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         connection.execute_batch("CREATE TABLE preserved (value TEXT); INSERT INTO preserved VALUES ('keep'); PRAGMA user_version = 6;").unwrap();
         drop(connection);
         assert!(matches!(
             SqliteMessageRepository::open(&path),
             Err(StorageError::UnsupportedSchemaVersion(6))
         ));
-        let connection = Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         assert_eq!(
             connection
                 .query_row("SELECT value FROM preserved", [], |row| row
@@ -249,7 +250,7 @@ mod tests {
     fn failed_schema_creation_does_not_mark_database_as_initialized() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("messages.sqlite");
-        let connection = Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         connection
             .execute_batch("CREATE TABLE messages (existing TEXT);")
             .unwrap();
@@ -258,7 +259,7 @@ mod tests {
             SqliteMessageRepository::open(&path),
             Err(StorageError::Sqlite(_))
         ));
-        let connection = Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -286,7 +287,7 @@ mod tests {
     fn migrates_version_one_without_losing_messages_and_preserves_tie_order() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("messages.sqlite");
-        let connection = Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         connection.execute_batch("CREATE TABLE messages(id TEXT PRIMARY KEY NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL);
             INSERT INTO messages VALUES ('z', 'first', 10), ('a', 'second', 10), ('later', 'third', 11);
             PRAGMA user_version = 1;").unwrap();
@@ -319,7 +320,7 @@ mod tests {
     fn rejects_damaged_version_two_schema() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("messages.sqlite");
-        let connection = Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         connection
             .execute_batch("CREATE TABLE messages(text TEXT); PRAGMA user_version = 2;")
             .unwrap();
@@ -395,7 +396,7 @@ mod identity_tests {
     }
 
     fn legacy(path: &Path, time: i64) {
-        let connection = Connection::open(path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(path).unwrap();
         connection.execute_batch("CREATE TABLE messages(id TEXT PRIMARY KEY NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL);
             CREATE INDEX idx_messages_created_at ON messages(created_at); PRAGMA user_version=2;").unwrap();
         connection.execute("INSERT INTO messages(rowid,id,text,created_at) VALUES(42, 'legacy-z', ' original text ', ?1), (84, 'legacy-a', 'second', ?1)", params![time]).unwrap();
@@ -438,7 +439,7 @@ mod identity_tests {
         let path = directory.path().join("messages.sqlite");
         legacy(&path, -1);
         assert!(SqliteMessageRepository::open(&path).is_err());
-        let connection = Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         assert_eq!(
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -477,7 +478,7 @@ mod identity_tests {
                 "invalid.sqlite"
             });
             drop(SqliteMessageRepository::open(&path).unwrap());
-            let connection = Connection::open(&path).unwrap();
+            let connection = crate::encrypted_storage::test_connection(&path).unwrap();
             connection.execute_batch(damage).unwrap();
             drop(connection);
             assert!(matches!(

@@ -3,6 +3,8 @@ use tauri::Manager;
 mod chat_state;
 pub mod clock;
 mod commands;
+mod credentials;
+mod encrypted_storage;
 pub mod identity;
 pub mod incoming_message;
 pub mod message;
@@ -13,6 +15,7 @@ mod retention;
 mod sqlite_identity;
 mod sqlite_peer;
 pub mod sqlite_repository;
+mod storage_bootstrap;
 mod storage_error;
 
 #[cfg(target_os = "macos")]
@@ -47,24 +50,16 @@ pub fn run() {
         #[cfg(target_os = "macos")]
         startup_lock.finish()?;
 
-        let database_path = app.path().app_data_dir()?.join("messages.sqlite");
-        let state =
-            tauri::async_runtime::block_on(tauri::async_runtime::spawn_blocking(move || {
-                chat_state::initialize(database_path)
-            }))?
-            .map_err(|error| error as Box<dyn std::error::Error>)?;
-        app.manage(state.clone());
-        app.manage(peer::commands::PeerApp::new(
-            app.handle().clone(),
-            state.clone(),
-        ));
-        app.manage(retention::RetentionTask::start(app.handle().clone(), state));
+        app.manage(storage_bootstrap::StorageBootstrap::default());
+        storage_bootstrap::start(app.handle().clone());
         Ok(())
     });
 
     builder
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            storage_bootstrap::get_storage_status,
+            storage_bootstrap::retry_storage_init,
             commands::list_messages,
             commands::send_message,
             peer::commands::get_peer_setup,
@@ -80,6 +75,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(storage) = app.try_state::<storage_bootstrap::StorageBootstrap>() {
+                    storage.stop();
+                }
                 if let Some(peer) = app.try_state::<peer::commands::PeerApp>() {
                     tauri::async_runtime::block_on(peer.coordinator.disconnect());
                 }
