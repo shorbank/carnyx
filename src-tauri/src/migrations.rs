@@ -85,6 +85,22 @@ fn validate_legacy(connection: &Connection, version: i64) -> Result<(), StorageE
 pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, StorageError> {
     // Serialize opening/migration across independent repository connections.
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let identity = migrate_transaction(&transaction)?;
+    transaction.commit()?;
+    Ok(identity)
+}
+
+/// Check schema upgrades on the encrypted candidate without changing its logical copy.
+pub(crate) fn validate_upgrade(connection: &mut Connection) -> Result<(), StorageError> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    migrate_transaction(&transaction)?;
+    transaction.rollback()?;
+    Ok(())
+}
+
+fn migrate_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<LocalIdentity, StorageError> {
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if !(0..=5).contains(&version) {
         return Err(StorageError::UnsupportedSchemaVersion(version));
@@ -150,6 +166,5 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, Stor
         "peer_session_settings",
         CREATE_SESSION_SETTINGS,
     )?;
-    transaction.commit()?;
     Ok(identity)
 }

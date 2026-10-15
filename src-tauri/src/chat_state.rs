@@ -9,10 +9,16 @@ use std::{
 
 pub type ChatState = Arc<Mutex<MessageService<SqliteMessageRepository>>>;
 
+#[cfg(test)]
 pub fn initialize(
     path: impl AsRef<std::path::Path>,
 ) -> Result<ChatState, Box<dyn std::error::Error + Send + Sync>> {
-    let repository = SqliteMessageRepository::open(path)?;
+    from_repository(SqliteMessageRepository::open(path)?)
+}
+
+pub(crate) fn from_repository(
+    repository: SqliteMessageRepository,
+) -> Result<ChatState, Box<dyn std::error::Error + Send + Sync>> {
     let local_peer = repository.local_identity().peer_id();
     let mut service = MessageService::new(repository, local_peer);
     service.cleanup_expired()?;

@@ -121,7 +121,7 @@ fn version_three_migration_preserves_identity_messages_and_backfills_pending_del
     let mut service = MessageService::with_clock(repo, Time(100), own);
     let message = service.create_outgoing(peer, "before migration").unwrap();
     drop(service);
-    let connection = rusqlite::Connection::open(&path).unwrap();
+    let connection = crate::encrypted_storage::test_connection(&path).unwrap();
     connection.execute_batch("DROP TABLE peer_session_settings; DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3;").unwrap();
     drop(connection);
     let repository = SqliteMessageRepository::open(&path).unwrap();
@@ -149,11 +149,11 @@ fn failed_version_four_upgrade_rolls_back_and_damaged_version_four_is_rejected()
     let (dir, repository) = repository();
     let path = dir.path().join("messages.sqlite");
     drop(repository);
-    let c = rusqlite::Connection::open(&path).unwrap();
+    let c = crate::encrypted_storage::test_connection(&path).unwrap();
     c.execute_batch("DROP TABLE peer_session_settings; DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3; CREATE TABLE deliveries(broken TEXT);").unwrap();
     drop(c);
     assert!(SqliteMessageRepository::open(&path).is_err());
-    let c = rusqlite::Connection::open(&path).unwrap();
+    let c = crate::encrypted_storage::test_connection(&path).unwrap();
     assert_eq!(
         c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
@@ -171,7 +171,7 @@ fn failed_version_four_upgrade_rolls_back_and_damaged_version_four_is_rejected()
     c.execute_batch("DROP TABLE deliveries").unwrap();
     drop(c);
     drop(SqliteMessageRepository::open(&path).unwrap());
-    let c = rusqlite::Connection::open(&path).unwrap();
+    let c = crate::encrypted_storage::test_connection(&path).unwrap();
     c.execute_batch("DROP TABLE deliveries; CREATE TABLE deliveries(broken TEXT);")
         .unwrap();
     drop(c);
@@ -539,7 +539,7 @@ fn session_settings_migrate_from_v4_and_persist_atomically_with_pins() {
     let message = MessageService::new(repo, own)
         .create_outgoing(peer.peer().unwrap(), "preserved")
         .unwrap();
-    let c = rusqlite::Connection::open(&path).unwrap();
+    let c = crate::encrypted_storage::test_connection(&path).unwrap();
     c.execute_batch("DROP TABLE peer_session_settings; PRAGMA user_version=4;")
         .unwrap();
     drop(c);
@@ -595,7 +595,7 @@ fn failed_v5_migration_rolls_back_and_damaged_v5_is_rejected() {
     let (dir, repo) = repository();
     let path = dir.path().join("messages.sqlite");
     drop(repo);
-    let c = rusqlite::Connection::open(&path).unwrap();
+    let c = crate::encrypted_storage::test_connection(&path).unwrap();
     c.execute_batch("DROP TABLE peer_session_settings; CREATE TABLE peer_session_settings(broken TEXT); PRAGMA user_version=4;").unwrap();
     assert!(SqliteMessageRepository::open(&path).is_err());
     assert_eq!(

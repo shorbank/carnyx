@@ -69,7 +69,7 @@ mod tests {
         let mut repository = SqliteMessageRepository::open(&path).unwrap();
         let old = Message::local("expire", 0, repository.local_identity().peer_id()).unwrap();
         repository.insert(&old).unwrap();
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
         let app = tauri::test::mock_app();
         let window = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())

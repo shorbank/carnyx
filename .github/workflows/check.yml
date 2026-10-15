@@ -22,15 +22,12 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run check
+      - run: python scripts/verify-sqlcipher.py
       - run: cargo fmt --check
         working-directory: src-tauri
       - run: cargo check --locked
         working-directory: src-tauri
-      - if: runner.os == 'macOS'
-        run: cargo test --lib --locked
-        working-directory: src-tauri
-      - if: runner.os == 'Windows'
-        run: cargo test --lib --locked --no-run
+      - run: cargo test --lib --locked
         working-directory: src-tauri
       - if: runner.os == 'macOS'
         run: npm run tauri build -- --debug --bundles app

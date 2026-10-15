@@ -524,7 +524,7 @@ mod peer_tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("messages.sqlite");
         let mut service = service(&path, 100);
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         connection.execute_batch("CREATE TRIGGER fail_insert BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
         let peer = PeerId::generate();
         assert!(matches!(

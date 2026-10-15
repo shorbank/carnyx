@@ -83,39 +83,18 @@ impl OsSecretStore {
             service: format!("{identifier}.noise-key.v1"),
         }
     }
-    fn entry(&self, peer: PeerId) -> Result<keyring_core::Entry> {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            use keyring_core::api::CredentialStoreApi;
-            #[cfg(target_os = "macos")]
-            let store = apple_native_keyring_store::keychain::Store::new();
-            #[cfg(target_os = "windows")]
-            let store = windows_native_keyring_store::store::Store::new();
-            store
-                .and_then(|s| s.build(&self.service, &peer.to_string(), None))
-                .map_err(|e| PeerError::new("key_unavailable", e))
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = peer;
-            Err(PeerError::new(
-                "unsupported_platform",
-                "peer transport supports macOS and Windows",
-            ))
-        }
-    }
 }
 impl SecretStore for OsSecretStore {
     fn load(&self, peer: PeerId) -> Result<Option<Vec<u8>>> {
-        match self.entry(peer)?.get_secret() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring_core::Error::NoEntry) => Ok(None),
-            Err(e) => Err(PeerError::new("key_unavailable", e)),
-        }
+        use crate::credentials::Credentials;
+        crate::credentials::OsCredentials
+            .load(&self.service, &peer.to_string())
+            .map_err(|_| PeerError::new("key_unavailable", "native credential store unavailable"))
     }
     fn save(&self, peer: PeerId, secret: &[u8]) -> Result<()> {
-        self.entry(peer)?
-            .set_secret(secret)
-            .map_err(|e| PeerError::new("key_unavailable", e))
+        use crate::credentials::Credentials;
+        crate::credentials::OsCredentials
+            .save(&self.service, &peer.to_string(), secret)
+            .map_err(|_| PeerError::new("key_unavailable", "native credential store unavailable"))
     }
 }

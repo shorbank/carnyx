@@ -201,7 +201,7 @@ mod tests {
             invoke(&window, "list_messages", serde_json::json!({})).unwrap(),
             serde_json::json!([])
         );
-        let connection = rusqlite::Connection::open(&path).unwrap();
+        let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         assert_eq!(
             connection
                 .query_row("SELECT COUNT(*) FROM messages", [], |row| row
