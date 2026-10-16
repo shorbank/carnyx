@@ -56,7 +56,6 @@ pub fn run() {
     });
 
     builder
-        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             storage_bootstrap::get_storage_status,
             storage_bootstrap::retry_storage_init,
