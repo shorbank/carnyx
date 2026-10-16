@@ -121,7 +121,8 @@ fn version_three_migration_preserves_identity_messages_and_backfills_pending_del
     let mut service = MessageService::with_clock(repo, Time(100), own);
     let message = service.create_outgoing(peer, "before migration").unwrap();
     drop(service);
-    let connection = crate::encrypted_storage::test_connection(&path).unwrap();
+    let mut connection = crate::encrypted_storage::test_connection(&path).unwrap();
+    crate::migrations::restore_legacy_fixture(&mut connection).unwrap();
     connection.execute_batch("DROP TABLE peer_session_settings; DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3;").unwrap();
     drop(connection);
     let repository = SqliteMessageRepository::open(&path).unwrap();
@@ -149,7 +150,8 @@ fn failed_version_four_upgrade_rolls_back_and_damaged_version_four_is_rejected()
     let (dir, repository) = repository();
     let path = dir.path().join("messages.sqlite");
     drop(repository);
-    let c = crate::encrypted_storage::test_connection(&path).unwrap();
+    let mut c = crate::encrypted_storage::test_connection(&path).unwrap();
+    crate::migrations::restore_legacy_fixture(&mut c).unwrap();
     c.execute_batch("DROP TABLE peer_session_settings; DROP TABLE deliveries; DROP TABLE trusted_peer; DROP TABLE peer_keys; DROP TABLE transport_identity; PRAGMA user_version=3; CREATE TABLE deliveries(broken TEXT);").unwrap();
     drop(c);
     assert!(SqliteMessageRepository::open(&path).is_err());
@@ -302,14 +304,14 @@ async fn noise_transport_authenticates_both_sides_and_moves_frames_bidirectional
                 TcpStream::connect(address).await.unwrap(),
                 &ak,
                 aid,
-                &bi,
+                &bi.identity().unwrap(),
                 true,
             )
             .await
         },
         async {
             let (stream, _) = listener.accept().await.unwrap();
-            transport::handshake(stream, &bk, bid, &ai, false).await
+            transport::handshake(stream, &bk, bid, &ai.identity().unwrap(), false).await
         }
     );
     let mut client = client.unwrap();
@@ -365,14 +367,14 @@ async fn wrong_key_and_wrong_peer_identity_never_establish_a_session() {
                     TcpStream::connect(address).await.unwrap(),
                     &ak,
                     aid,
-                    &bi,
+                    &bi.identity().unwrap(),
                     true,
                 )
                 .await
             },
             async {
                 let (stream, _) = listener.accept().await.unwrap();
-                transport::handshake(stream, &bk, bid, &ai, false).await
+                transport::handshake(stream, &bk, bid, &ai.identity().unwrap(), false).await
             }
         );
         assert_eq!(client.err().unwrap().code, "authentication_failed");
@@ -539,7 +541,8 @@ fn session_settings_migrate_from_v4_and_persist_atomically_with_pins() {
     let message = MessageService::new(repo, own)
         .create_outgoing(peer.peer().unwrap(), "preserved")
         .unwrap();
-    let c = crate::encrypted_storage::test_connection(&path).unwrap();
+    let mut c = crate::encrypted_storage::test_connection(&path).unwrap();
+    crate::migrations::restore_legacy_fixture(&mut c).unwrap();
     c.execute_batch("DROP TABLE peer_session_settings; PRAGMA user_version=4;")
         .unwrap();
     drop(c);
@@ -548,7 +551,7 @@ fn session_settings_migrate_from_v4_and_persist_atomically_with_pins() {
     assert_eq!(repo.selected_peer().unwrap(), Some(peer.clone()));
     assert!(repo.saved_session(peer.peer().unwrap()).unwrap().is_none());
     assert_eq!(repo.find_by_id(message.id()).unwrap(), Some(message));
-    let settings = SessionSettings {
+    let settings = SessionSettings::Lan {
         local_address: Ipv4Addr::LOCALHOST,
         local_port: 32148,
         role: Role::Responder,
@@ -568,7 +571,7 @@ fn session_settings_migrate_from_v4_and_persist_atomically_with_pins() {
             .code,
         "peer_key_changed"
     );
-    repo.connection.execute_batch("CREATE TRIGGER fail_settings BEFORE INSERT ON peer_session_settings BEGIN SELECT RAISE(ABORT, 'fail'); END;").unwrap();
+    repo.connection.execute_batch("CREATE TRIGGER fail_settings BEFORE INSERT ON connection_profile BEGIN SELECT RAISE(ABORT, 'fail'); END;").unwrap();
     let other = Invitation::new(PeerId::generate(), &[3; 32], endpoint(32150));
     assert_eq!(
         repo.select_session(&other, &settings).unwrap_err().code,
@@ -595,7 +598,8 @@ fn failed_v5_migration_rolls_back_and_damaged_v5_is_rejected() {
     let (dir, repo) = repository();
     let path = dir.path().join("messages.sqlite");
     drop(repo);
-    let c = crate::encrypted_storage::test_connection(&path).unwrap();
+    let mut c = crate::encrypted_storage::test_connection(&path).unwrap();
+    crate::migrations::restore_legacy_fixture(&mut c).unwrap();
     c.execute_batch("DROP TABLE peer_session_settings; CREATE TABLE peer_session_settings(broken TEXT); PRAGMA user_version=4;").unwrap();
     assert!(SqliteMessageRepository::open(&path).is_err());
     assert_eq!(
@@ -608,11 +612,9 @@ fn failed_v5_migration_rolls_back_and_damaged_v5_is_rejected() {
     assert_eq!(
         c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        5
+        6
     );
-    c.execute_batch(
-        "DROP TABLE peer_session_settings; CREATE TABLE peer_session_settings(broken TEXT)",
-    )
-    .unwrap();
+    c.execute_batch("DROP TABLE connection_profile; CREATE TABLE connection_profile(broken TEXT)")
+        .unwrap();
     assert!(SqliteMessageRepository::open(&path).is_err());
 }

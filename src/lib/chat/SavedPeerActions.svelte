@@ -6,7 +6,7 @@
   } = $props();
 </script>
 <section class="saved-peer" class:compact aria-label="Gespeicherte Verbindung">
-  {#if !compact}<h2>Gespeichertes Gegenüber</h2><p class="identity">{peer.peerId.slice(0, 8)} · {peer.address}</p><p class="hint">{roleLabel}</p>{/if}
+  {#if !compact}<h2>Gespeichertes Gegenüber</h2><p class="identity">{peer.peerId.slice(0, 8)} · {peer.target.mode === "lan" ? peer.target.address : "Internet"}</p><p class="hint">{roleLabel}</p>{/if}
   {#if hint}<p class="hint">{hint}</p>{/if}
   <div class="actions"><button type="button" class="primary" disabled={!canReconnect} onclick={onreconnect}>{busy ? "Bitte warten …" : "Erneut verbinden"}</button><button type="button" disabled={busy} onclick={onedit}>Einrichtung ändern</button></div>
 </section>

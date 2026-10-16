@@ -3,17 +3,14 @@ use super::{
     PeerError, Result,
     delivery::{PendingMessage, retry_delay},
     keys::Keys,
+    network::{Connector, NetworkConfig},
     protocol::{Frame, WireMessage},
     transport::{self, Session},
-    types::{Invitation, PeerState, Role},
+    types::{ConnectionPath, Invitation, PeerState, Role, SessionSettings},
 };
 use crate::identity::PeerId;
-use std::{
-    net::SocketAddrV4,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 use tokio::{
-    net::{TcpListener, TcpStream},
     sync::{Mutex as AsyncMutex, Notify},
     task::JoinHandle,
     time::{Duration, Instant, timeout},
@@ -41,6 +38,7 @@ async fn database<T: Send + 'static>(
 struct Control {
     state: PeerState,
     generation: u64,
+    path_epoch: u64,
     active: Option<(CancellationToken, JoinHandle<()>)>,
 }
 struct Shared {
@@ -49,6 +47,23 @@ struct Shared {
     events: Arc<dyn Events>,
 }
 impl Shared {
+    fn publish_path(&self, generation: u64, epoch: u64, path: ConnectionPath) {
+        let state = {
+            let mut c = self.control.lock().expect("coordinator lock");
+            if c.generation != generation
+                || c.path_epoch != epoch
+                || c.state.phase != "connected"
+                || c.state.path == Some(path)
+            {
+                return;
+            }
+            c.state.path = Some(path);
+            c.state.revision += 1;
+            c.state.clone()
+        };
+        self.events.state_changed(state);
+    }
+
     fn publish(&self, generation: u64, phase: &'static str, error: Option<&'static str>) {
         let state = {
             let mut control = self.control.lock().expect("coordinator lock");
@@ -56,6 +71,12 @@ impl Shared {
                 return;
             }
             control.state.phase = phase;
+            if phase == "connected" {
+                control.path_epoch = control.path_epoch.wrapping_add(1);
+            }
+            if phase != "connected" {
+                control.state.path = None;
+            }
             control.state.error = error;
             control.state.revision += 1;
             control.state.clone()
@@ -67,6 +88,7 @@ pub struct Coordinator {
     shared: Arc<Shared>,
     db: Arc<dyn Persistence>,
     lifecycle: AsyncMutex<()>,
+    network: NetworkConfig,
 }
 impl Coordinator {
     pub fn new(db: Arc<dyn Persistence>, events: Arc<dyn Events>) -> Self {
@@ -75,6 +97,7 @@ impl Coordinator {
                 control: Mutex::new(Control {
                     state: PeerState::default(),
                     generation: 0,
+                    path_epoch: 0,
                     active: None,
                 }),
                 wake: Notify::new(),
@@ -82,7 +105,13 @@ impl Coordinator {
             }),
             db,
             lifecycle: AsyncMutex::new(()),
+            network: NetworkConfig::default(),
         }
+    }
+    #[cfg(test)]
+    pub fn with_network(mut self, network: NetworkConfig) -> Self {
+        self.network = network;
+        self
     }
     pub fn state(&self) -> PeerState {
         self.shared
@@ -99,13 +128,35 @@ impl Coordinator {
         let s = self.state();
         s.phase == "connected" && s.peer_id.as_deref() == Some(peer.to_string().as_str())
     }
+    #[cfg(test)]
     pub async fn start(
         &self,
         keys: Keys,
         own: PeerId,
         peer: Invitation,
         role: Role,
-        endpoint: SocketAddrV4,
+        endpoint: std::net::SocketAddrV4,
+    ) -> Result<()> {
+        self.start_session(
+            keys,
+            own,
+            peer,
+            SessionSettings::Lan {
+                local_address: *endpoint.ip(),
+                local_port: endpoint.port(),
+                role,
+            },
+            None,
+        )
+        .await
+    }
+    pub async fn start_session(
+        &self,
+        keys: Keys,
+        own: PeerId,
+        peer: Invitation,
+        settings: SessionSettings,
+        internet_key: Option<iroh::SecretKey>,
     ) -> Result<()> {
         let _guard = self.lifecycle.lock().await;
         if self.state().phase != "disconnected" {
@@ -114,21 +165,19 @@ impl Coordinator {
                 "disconnect before changing peer",
             ));
         }
-        let listener = if role == Role::Responder {
-            Some(TcpListener::bind(endpoint).await?)
-        } else {
-            None
-        };
+        let connector = Connector::new(own, &peer, &settings, internet_key, &self.network).await?;
         let cancel = CancellationToken::new();
         let generation = {
             let mut c = self.shared.control.lock().expect("coordinator lock");
             c.generation += 1;
             c.state.peer_id = Some(peer.peer_id.clone());
+            c.state.mode = Some(connector.mode());
+            c.state.path = None;
             c.generation
         };
         self.shared.publish(
             generation,
-            if role == Role::Responder {
+            if connector.role == Role::Responder {
                 "listening"
             } else {
                 "connecting"
@@ -139,10 +188,7 @@ impl Coordinator {
         let db = self.db.clone();
         let token = cancel.clone();
         let task = tokio::spawn(async move {
-            run(
-                shared, db, generation, token, keys, own, peer, role, endpoint, listener,
-            )
-            .await;
+            run(shared, db, generation, token, keys, own, peer, connector).await;
         });
         let old = self
             .shared
@@ -202,35 +248,35 @@ async fn run(
     keys: Keys,
     own: PeerId,
     peer: Invitation,
-    role: Role,
-    endpoint: SocketAddrV4,
-    mut listener: Option<TcpListener>,
+    mut connector: Connector,
 ) {
     let mut attempt = 0u32;
     loop {
         let established = tokio::select! {
             _=cancel.cancelled()=>break,
             result=async {
-                let stream=if role==Role::Initiator {
-                    shared.publish(generation,"connecting",None);
-                    timeout(Duration::from_secs(5),TcpStream::connect(peer.address)).await.map_err(|_|PeerError::new("timeout","connect timeout"))??
-                } else {
-                    shared.publish(generation,"listening",None);
-                    let bound=match listener.take(){Some(l)=>l,None=>TcpListener::bind(endpoint).await?};
-                    let (stream,_)=bound.accept().await?;stream
-                };
+                shared.publish(generation,if connector.role==Role::Initiator {"connecting"}else{"listening"},None);
+                let established=connector.establish().await?;
                 shared.publish(generation,"handshaking",None);
-                transport::handshake(stream,&keys,own,&peer,role==Role::Initiator).await
+                let identity=peer.identity()?;
+                let session=transport::handshake(established.stream,&keys,own,&identity,connector.role==Role::Initiator).await?;
+                Ok::<_,PeerError>((session,established.lease))
             }=>result
         };
         let result = match established {
-            Ok(session) => {
+            Ok((session, lease)) => {
                 attempt = 0;
                 shared.publish(generation, "connected", None);
+                let epoch = shared.control.lock().expect("coordinator lock").path_epoch;
+                let observed = shared.clone();
+                let _paths = lease.observe(Arc::new(move |path| {
+                    observed.publish_path(generation, epoch, path)
+                }));
                 exchange(session, db.clone(), shared.clone(), cancel.clone()).await
             }
             Err(e)
-                if role == Role::Responder
+                if connector.mode() == super::types::ConnectionMode::Lan
+                    && connector.role == Role::Responder
                     && matches!(e.code, "authentication_failed" | "protocol_error") =>
             {
                 eprintln!("Rejected connection: {e}");
@@ -245,13 +291,14 @@ async fn run(
             eprintln!("Peer session: {error}");
             if !error.transient() {
                 shared.publish(generation, "disconnected", Some(error.code));
-                return;
+                break;
             }
             shared.publish(generation, "reconnecting", Some(error.code));
         }
         tokio::select! {_=cancel.cancelled()=>break,_=tokio::time::sleep(retry_delay(attempt))=>{}}
         attempt = attempt.saturating_add(1);
     }
+    connector.close().await;
 }
 
 struct Received {

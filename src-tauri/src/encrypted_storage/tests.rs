@@ -48,17 +48,20 @@ fn legacy(path: &Path, version: i64) {
                 .unwrap();
         }
     } else {
-        let identity = crate::migrations::migrate(&mut c).unwrap();
+        let identity = crate::migrations::legacy_v5(&mut c).unwrap();
         let peer = "61f3f556-b896-4b43-bce0-507d166543e8";
         c.execute("INSERT INTO messages(rowid,id,text,created_at,sender_id,recipient_id,direction,received_at) VALUES(9,'a',?1,100,?2,NULL,'local',NULL),(43,'b',?1,100,?2,NULL,'local',NULL),(77,'out',?1,101,?2,?3,'outgoing',NULL)", rusqlite::params![CANARY,identity.peer_id().to_string(),peer]).unwrap();
         c.execute_batch("INSERT INTO transport_identity VALUES(1,zeroblob(32)); INSERT INTO deliveries VALUES('out','acknowledged',3,102);").unwrap();
         c.execute(
-            "INSERT INTO trusted_peer VALUES(1,?1,zeroblob(32),'127.0.0.1:4250')",
-            [peer],
+            "INSERT INTO trusted_peer VALUES(1,?1,?2,'127.0.0.1:4250')",
+            rusqlite::params![peer, vec![1u8; 32]],
         )
         .unwrap();
-        c.execute("INSERT INTO peer_keys VALUES(?1,zeroblob(32))", [peer])
-            .unwrap();
+        c.execute(
+            "INSERT INTO peer_keys VALUES(?1,?2)",
+            rusqlite::params![peer, vec![1u8; 32]],
+        )
+        .unwrap();
         c.execute(
             "INSERT INTO peer_session_settings VALUES(1,?1,'127.0.0.1',4250,'responder')",
             [peer],
@@ -199,25 +202,28 @@ fn migrates_all_supported_versions_preserving_rows_order_identity_pins_and_deliv
             assert_eq!(&rowids[..2], &[9, 43]);
         }
         if version >= 4 {
+            assert_eq!(repository.connection.query_row("SELECT public_key FROM peer_keys WHERE peer_id='61f3f556-b896-4b43-bce0-507d166543e8'", [], |r| r.get::<_, Vec<u8>>(0)).unwrap(), vec![1u8; 32]);
             assert_eq!(repository.connection.query_row("SELECT state,attempts,acknowledged_at FROM deliveries WHERE message_id='out'",[],|r|Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?))).unwrap(),("acknowledged".into(),3,102));
             assert_eq!(
                 repository
-                    .connection
-                    .query_row("SELECT address FROM trusted_peer", [], |r| r
-                        .get::<_, String>(0))
-                    .unwrap(),
+                    .connection_profile()
+                    .unwrap()
+                    .unwrap()
+                    .invitation
+                    .lan_address()
+                    .unwrap()
+                    .to_string(),
                 "127.0.0.1:4250"
             );
         }
         if version == 5 {
-            assert_eq!(
-                repository
-                    .connection
-                    .query_row("SELECT role FROM peer_session_settings", [], |r| r
-                        .get::<_, String>(0))
-                    .unwrap(),
-                "responder"
-            );
+            assert!(matches!(
+                repository.connection_profile().unwrap().unwrap().session,
+                Some(crate::peer::types::SessionSettings::Lan {
+                    role: crate::peer::types::Role::Responder,
+                    ..
+                })
+            ));
         }
         drop(repository);
         assert_ciphertext(directory.path());

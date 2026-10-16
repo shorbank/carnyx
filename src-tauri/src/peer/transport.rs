@@ -1,20 +1,23 @@
-//! TCP framing and authenticated encryption only. No database or Tauri dependency.
+//! Framing and authenticated encryption over an ordered bidirectional stream. No database or Tauri dependency.
 use super::{
     PeerError, Result,
     keys::Keys,
     protocol::{Frame, MAX_FRAME, NOISE, PROLOGUE},
-    types::Invitation,
+    types::PeerIdentity,
 };
 use crate::identity::PeerId;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
-    net::TcpStream,
+    io::{AsyncRead, AsyncWrite},
     time::{Duration, timeout},
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-type Socket = Framed<TcpStream, LengthDelimitedCodec>;
+pub trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> DuplexStream for T {}
+pub type Stream = Box<dyn DuplexStream>;
+type Socket = Framed<Stream, LengthDelimitedCodec>;
 pub struct Session {
     socket: Socket,
     noise: snow::TransportState,
@@ -44,17 +47,16 @@ async fn write(socket: &mut Socket, bytes: Vec<u8>) -> Result<()> {
         .map_err(|_| PeerError::new("timeout", "write timeout"))?
         .map_err(framing)
 }
-pub async fn handshake(
-    stream: TcpStream,
+pub async fn handshake<S: DuplexStream + 'static>(
+    stream: S,
     keys: &Keys,
     own: PeerId,
-    expected: &Invitation,
+    expected: &PeerIdentity,
     initiator: bool,
 ) -> Result<Session> {
     timeout(Duration::from_secs(10), async {
-        stream.set_nodelay(true)?;
         let mut socket = Framed::new(
-            stream,
+            Box::new(stream) as Stream,
             LengthDelimitedCodec::builder()
                 .max_frame_length(MAX_FRAME)
                 .new_codec(),
@@ -79,7 +81,7 @@ pub async fn handshake(
                 let bytes = read(&mut socket).await?;
                 state.read_message(&bytes, &mut buffer).map_err(crypto)?;
                 if let Some(remote) = state.get_remote_static() {
-                    if remote != expected.key()? {
+                    if remote != expected.public_key {
                         return Err(PeerError::new(
                             "authentication_failed",
                             "remote key differs from connection code",
@@ -88,7 +90,7 @@ pub async fn handshake(
                 }
             }
         }
-        if state.get_remote_static() != Some(expected.key()?.as_slice()) {
+        if state.get_remote_static() != Some(expected.public_key.as_slice()) {
             return Err(PeerError::new(
                 "authentication_failed",
                 "remote key missing or mismatched",
@@ -97,13 +99,13 @@ pub async fn handshake(
         let mut session = Session {
             socket,
             noise: state.into_transport_mode().map_err(crypto)?,
-            peer: expected.peer()?,
+            peer: expected.peer,
         };
         session
             .send(&Frame::Ready {
                 version: 1,
                 peer_id: own.to_string(),
-                recipient_id: expected.peer_id.clone(),
+                recipient_id: expected.peer.to_string(),
             })
             .await?;
         match session.receive().await? {
@@ -111,7 +113,9 @@ pub async fn handshake(
                 version: 1,
                 peer_id,
                 recipient_id,
-            } if peer_id == expected.peer_id && recipient_id == own.to_string() => Ok(session),
+            } if peer_id == expected.peer.to_string() && recipient_id == own.to_string() => {
+                Ok(session)
+            }
             _ => Err(PeerError::new(
                 "authentication_failed",
                 "invalid peer identity or protocol version",
@@ -154,8 +158,12 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::Invitation;
     use super::*;
-    use tokio::{io::AsyncWriteExt, net::TcpListener};
+    use tokio::{
+        io::AsyncWriteExt,
+        net::{TcpListener, TcpStream},
+    };
     fn key() -> Keys {
         let key = snow::Builder::new(NOISE.parse().unwrap())
             .generate_keypair()
@@ -183,14 +191,14 @@ mod tests {
                     TcpStream::connect(address).await.unwrap(),
                     &a,
                     aid,
-                    &bi,
+                    &bi.identity().unwrap(),
                     true,
                 )
                 .await
             },
             async {
                 let (stream, _) = listener.accept().await.unwrap();
-                handshake(stream, &b, bid, &ai, false).await
+                handshake(stream, &b, bid, &ai.identity().unwrap(), false).await
             }
         );
         (a.unwrap(), b.unwrap())

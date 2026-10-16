@@ -3,16 +3,18 @@ import { listen } from "@tauri-apps/api/event";
 import { requireTauri, tauriChatApi, type ChatApi } from "./chat-api";
 import type { Message } from "./message";
 
-export interface Invitation { version: number; peerId: string; publicKey: string; address: string }
+export type ConnectionMode = "lan" | "internet";
+export type ConnectionTarget = { mode: "lan"; address: string } | { mode: "internet"; endpointId: string; relayUrl: string };
+export interface Invitation { peerId: string; publicKey: string; target: ConnectionTarget }
 export type PeerRole = "initiator" | "responder";
-export interface SessionSettings { localAddress: string; localPort: number; role: PeerRole }
+export type SessionSettings = { mode: "lan"; localAddress: string; localPort: number; role: PeerRole } | { mode: "internet" };
 export interface PeerSetup { peerId: string; publicKey: string | null; selectedPeer: Invitation | null; session: SessionSettings | null; addresses: string[] }
-export interface PeerState { phase: "disconnected" | "listening" | "connecting" | "handshaking" | "connected" | "reconnecting" | "disconnecting"; peerId: string | null; revision: number; error: string | null }
+export interface PeerState { phase: "disconnected" | "listening" | "connecting" | "handshaking" | "connected" | "reconnecting" | "disconnecting"; peerId: string | null; revision: number; error: string | null; mode: ConnectionMode | null; path: "direct" | "relay" | "unknown" | null }
 export interface PeerApi {
   setup(): Promise<PeerSetup>;
   state(): Promise<PeerState>;
-  code(address: string, port: number): Promise<string>;
-  connect(code: string, role: PeerRole, address: string, port: number): Promise<void>;
+  code(settings: SessionSettings): Promise<string>;
+  connect(code: string, settings: SessionSettings): Promise<void>;
   reconnect(): Promise<void>;
   disconnect(): Promise<void>;
   subscribe(callback: (state: PeerState) => void): Promise<() => void>;
@@ -20,8 +22,8 @@ export interface PeerApi {
 async function command<T>(name: string, args?: Record<string, unknown>): Promise<T> { requireTauri(); return invoke<T>(name, args); }
 export const tauriPeerApi: PeerApi = {
   setup: () => command("get_peer_setup"), state: () => command("get_peer_state"),
-  code: (address, port) => command("create_connection_code", { address, port }),
-  connect: (code, role, address, port) => command("start_peer_session", { code, role, address, port }),
+  code: (settings) => command("create_connection_code", { settings }),
+  connect: (code, settings) => command("start_peer_session", { code, settings }),
   reconnect: () => command("reconnect_peer"),
   disconnect: () => command("disconnect_peer"),
   async subscribe(callback) { requireTauri(); return listen<PeerState>("peer_state_changed", ({ payload }) => callback(payload), { target: "main" }); },

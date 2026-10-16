@@ -21,7 +21,7 @@ function fixture() {
   }
   const connection = {
     state: async () => { stateReads++; return { phase: 'disconnected', peerId: null, revision: 0, error: null }; },
-    setup: async () => ({ peerId: 'own', publicKey: 'key', addresses: ['192.168.1.2'], session: null, selectedPeer: selected ? { peerId: selected } : null }),
+    setup: async () => ({ peerId: 'own', publicKey: 'key', addresses: ['192.168.1.2'], session: null, selectedPeer: selected ? { peerId: selected, target: { mode: 'lan', address: '192.168.1.1:32147' } } : null }),
     code: async () => 'own-code', connect: async () => { connects++; }, reconnect: async () => {}, disconnect: async () => {},
     subscribe: async fn => { emit = fn; return () => removed++; },
   };
@@ -86,7 +86,7 @@ test('focus refreshes active history and connection; dispose ignores pending res
 test('saved peer and history are available directly after startup and reconnect preserves a draft across tabs', async () => {
   const f = fixture(); let reconnects = 0;
   const setup = f.connection.setup;
-  f.connection.setup = async () => ({ ...(await setup()), session: { localAddress: '192.168.1.2', localPort: 32147, role: 'initiator' } });
+  f.connection.setup = async () => ({ ...(await setup()), session: { mode: 'lan', localAddress: '192.168.1.2', localPort: 32147, role: 'initiator' } });
   const pending = deferred(); f.connection.reconnect = async () => { reconnects++; await pending.promise; f.emit('alice'); };
   await f.workspace.start(); assert.equal(f.value().peer.id, 'alice'); assert.equal(reconnects, 0);
   f.workspace.select('peer'); await flush(); assert.equal(get(f.value().peer.chat.state).loaded, true);

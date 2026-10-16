@@ -29,7 +29,7 @@ also refreshes history after standby or missed events.
 Only successfully stored messages are shown. While saving, the input stays editable;
 confirmation clears it only if it has not been edited since sending. Failed saves
 preserve the current draft and show an error, without automatic resend. Initial
-load failures can be retried. Outside Tauri, the storage gate stays unavailable; no replacement history is created. The peer view supports one authenticated LAN peer on macOS and Windows. Click-through is not implemented.
+load failures can be retried. Outside Tauri, the storage gate stays unavailable; no replacement history is created. The peer view supports one authenticated LAN or Internet peer on macOS and Windows. Click-through is not implemented.
 The UI uses an opaque, flat petrol-green dark theme with no blur or shadows.
 The **Lokal**, **Peer** and **Verbindung** tabs separate conversations from setup.
 Tabs support arrow keys and Home/End; switching tabs preserves drafts and reading
@@ -91,8 +91,8 @@ existing schema upgrades in a transaction that is rolled back. Only then does it
 retire the source (`messages.plaintext-retired.sqlite`), promote the candidate, and
 remove the old file and sidecars. Partial copies are recreated from the intact
 source; interruption between the two renames or during cleanup is resumed on retry.
-Ambiguous or corrupt artifacts block startup. Schema 5 and transport DTOs do not
-change. Expiration begins after conversion and cleanup, preserving existing policy.
+Ambiguous or corrupt artifacts block startup. Encryption preserves the logical
+database; schema upgrades are validated separately. Expiration begins after conversion and cleanup, preserving existing policy.
 The conversion temporarily needs space for another full database.
 
 This protects a copied database, not malware running as the unlocked OS user or
@@ -118,8 +118,8 @@ injected credentials and never access users' keys or application databases.
 
 Startup opens `messages.sqlite` in Tauri's application data directory and keeps a
 message service in managed application state. On first use, a transaction creates
-schema version 5: `messages(id, text, created_at, sender_id, recipient_id, direction,
-received_at)` and a singleton `local_identity` record. Version 1, 2, 3 and 4 databases are
+schema version 6: `messages(id, text, created_at, sender_id, recipient_id, direction,
+received_at)` and a singleton `local_identity` record, plus transport identities and a typed connection profile. Version 1–5 databases are
 migrated transactionally: existing IDs, text, timestamps and insertion order are
 preserved. Version 1 and 2 messages become local messages from the app's own identity;
 version 3 retains its existing directions and peer metadata. Unknown
@@ -174,7 +174,8 @@ The local UUID identifies this database, not an authenticated device. It survive
 message cleanup and app restarts; deleting the database creates a new identity.
 Transport keys and authenticated Noise sessions bind peer UUIDs to exchanged public
 keys. The receive API gets its source peer from the verified session, not the payload.
-Discovery, Internet connectivity, NAT traversal and relays remain future work.
+Public peer discovery remains outside the feature. Internet connections use explicit
+code exchange, NAT traversal and a fixed relay, described below.
 
 Rust tests use temporary directories and a controllable clock, covering migrations,
 reopening, identity stability, incoming validation, duplicate/conflict handling,
@@ -191,10 +192,72 @@ cargo fmt --check
 Build the desktop app from the project root:
 
 ```bash
-npm run tauri build -- --debug --bundles app
+npm run tauri build -- --bundles app
 ```
 
 ---
+
+## Internet Peer Chat (Pilot)
+
+Choose **Internet** in **Verbindung** on both devices. Show and exchange codes
+through a trusted channel, paste the other device's code, and click **Verbinden**
+on both devices. There is no IP, port or role selection. New setups default to
+Internet; saved LAN setups keep their original mode. One peer is supported.
+
+Carnyx uses pinned `iroh 1.3.0` with `tls-ring`, without its default features.
+`peer/network.rs` owns LAN sockets and Internet endpoints behind the same ordered
+bidirectional stream. `peer/transport.rs` applies the existing Noise handshake,
+framing, limits and encrypted identity confirmation on either stream. The
+coordinator retains the single delivery/retry implementation. The smaller canonical
+Carnyx UUID dials and starts Noise; the other side accepts the expected transport
+ID only. Incoming identity/Noise mismatches never enable sending.
+
+The configured public pilot relay is `https://euc1-1.relay.n0.iroh.link./` (number0's
+EU relay), centralized in `peer/types.rs`. Its address is included in v2 codes and
+is checked against the configured relay when importing or connecting. No arbitrary
+relay URL is accepted from a pasted code. iroh can upgrade from relay to a direct
+path; **Netzwerkdetails** reports the selected path from connection events. Changes
+of path do not restart the authenticated session or delivery state.
+
+There is no public endpoint address lookup/publication, automatic router port
+mapping, or automatic relay selection. Creating a code needs no network connection;
+network resources are created only on explicit connect/reconnect and closed on
+disconnect/exit. Tab changes and refreshes do not connect. Both applications must
+have started their sessions; new messages still require an authenticated connection.
+Unacknowledged messages survive locally and resume on reconnect within retention.
+There is no server-side offline queue or push service.
+
+The relay forwards encrypted traffic, but its operator can observe transport
+identifiers, IPs and traffic metadata. The public relay has no Carnyx availability
+guarantee. If its configured address changes, exchange new codes. No automatic
+public discovery or relay failover is enabled in this pilot.
+
+The separate Internet secret is stored under `<app identifier>.internet-key.v1`
+with the local Carnyx UUID as account, using the shared native credential adapter.
+Its public endpoint ID is stored in encrypted SQLite. Interrupted first setup can
+recover the stored secret; a missing/mismatched existing secret is never replaced.
+Internet key failures leave LAN and local chat available. Noise and history keys
+are not reused or rotated.
+
+Schema 6 transactionally replaces `trusted_peer` / `peer_session_settings` with a
+versioned `connection_profile` singleton and adds `internet_identity`. Old LAN
+selection and optional role/endpoint settings migrate together; messages, rowids,
+Noise identity, remembered key pins and delivery records stay unchanged. Imported
+v1 LAN codes retain their wire format. v2 codes carry Internet endpoint/relay
+information; mismatched modes, invalid profiles and unknown versions fail explicitly.
+
+Frontend mode/code/LAN components receive typed props and callbacks. The existing
+setup controller owns per-mode drafts, validation and stale response protection;
+the connection store owns mutations and lifecycle snapshots. UI components never
+open endpoints or access keys.
+
+Automated Internet tests use local relay servers and temporary encrypted databases,
+including forced-relay delivery/ACK/reconnect, direct Noise streams, wrong pins,
+unknown endpoints, cancellation and profile migration rollback. No public relay is
+required in CI. An isolated macOS probe also passed the existing Noise handshake
+and encrypted frames over the public EU relay with direct IP transports disabled.
+Windows, real macOS–Windows two-router acceptance, network changes/standby and native
+UI/credential prompt acceptance remain to be performed on actual devices.
 
 ## Authenticated LAN Peer Chat
 
@@ -205,11 +268,11 @@ the secret store or opening sockets. Showing a connection code or starting a ses
 initializes a persistent X25519 key. Its private half lives
 in macOS Keychain or Windows Credential Manager; SQLite stores only public keys.
 Missing or mismatched keys are never silently replaced. Key-store errors leave the
-local chat available. This does not encrypt the SQLite message file itself.
+local chat available. SQLCipher separately encrypts the complete SQLite database.
 
 To connect two computers on the same network:
 
-1. Open the **Verbindung** tab on both computers. In **Netzwerkdetails**, select
+1. Open the **Verbindung** tab on both computers and choose **Lokales Netzwerk**. In **Netzwerkdetails**, select
    each computer's LAN IPv4 address and a port (default `32147`). Choose
    **Eigenen Code anzeigen**.
 2. Exchange these public connection codes through a trusted channel and paste the
@@ -230,7 +293,8 @@ session explicitly; choosing a tab never connects automatically. **Einrichtung �
 opens the existing code-exchange form. Edited endpoint settings and drafts survive
 refreshes and tab switches.
 
-Schema 5 adds `peer_session_settings`, linked by peer ID to the selected peer. Peer
+Schema 5 introduced `peer_session_settings`, linked by peer ID to the selected peer;
+schema 6 migrates these fields into the common connection profile. Peer
 selection, public-key pinning and session settings commit together before the
 coordinator starts. These are the last validated requested settings, not a record of
 successful authentication; a failed connection or occupied listener port leaves them
@@ -290,15 +354,11 @@ migrations, exact retention boundaries, and store races. Tests also cover read-o
 full app-state recreation, resumed delivery with the original ID, migration rollback,
 atomic profile writes, missing addresses, duplicate actions, stale snapshots and
 clipboard failure. The compact reconnect UI was checked with isolated browser fixtures.
-Native two-device reconnect acceptance on macOS and Windows remains pending.
-The CI workflow builds and
-tests on macOS and Windows. Local macOS acceptance used two native apps with isolated
-databases and test credentials: encrypted bidirectional messages, Enter/Shift+Enter,
-button/focus behavior, separate histories/drafts, sender and receiver storage failures,
-automatic retry, reconnect, explicit disconnect and full restart with an outstanding
-delivery passed. Identity, IDs and sender timestamps survived; receipt time was local
-to the receiver and duplicate rows were absent. Native Windows and cross-platform LAN
-acceptance remain pending; the added CI workflow has not been executed here.
+CI runs Rust/TypeScript tests and produces production packages on macOS and Windows.
+The existing macOS two-app LAN acceptance covered bidirectional messages, drafts,
+storage failures, retries and restart with outstanding delivery. Native Internet,
+Windows and cross-platform two-router acceptance are still pending; automated
+transport tests do not replace those device checks.
 
 ---
 
@@ -323,6 +383,7 @@ acceptance remain pending; the added CI workflow has not been executed here.
 
 - [x] Implement one direct TCP peer connection on macOS and Windows (LAN)
 - [x] Authenticate exchanged public keys and encrypt messages with Noise
+- [x] Add Internet transport with a fixed relay and direct-path upgrades (pilot)
 - [x] Refresh incoming messages and durable delivery status through Tauri events
 
 ---
