@@ -14,6 +14,8 @@ const labels: Record<string, string> = {
   message_too_large: "Die Nachricht ist für den Peer-Versand zu groß (maximal 60 KiB einschließlich Nachrichtenformat).",
   storage_error: "Die Nachricht konnte nicht gespeichert werden.",
   not_available: "Peer-Chat ist nur in der Carnyx-Desktop-App verfügbar.",
+  mode_mismatch: "Dieser Verbindungscode gehört zu einer anderen Verbindungsart. Bitte Internet oder Lokales Netzwerk passend wählen.",
+  unsupported_relay: "Dieser Code verwendet einen anderen Relay. Bitte aktuelle Codes austauschen.",
   unsupported_platform: "Peer-Chat unterstützt derzeit Windows und macOS.",
 };
 export function peerError(error: unknown): string {

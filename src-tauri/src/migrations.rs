@@ -1,5 +1,5 @@
 use crate::{identity::LocalIdentity, sqlite_identity, storage_error::StorageError};
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const CREATE_MESSAGES: &str = "CREATE TABLE messages_v3 (
     id TEXT PRIMARY KEY NOT NULL CHECK(length(id) > 0),
@@ -21,6 +21,9 @@ const CREATE_TRUSTED_PEER: &str = "CREATE TABLE trusted_peer(slot INTEGER PRIMAR
 const CREATE_PEER_KEYS: &str = "CREATE TABLE peer_keys(peer_id TEXT PRIMARY KEY NOT NULL, public_key BLOB NOT NULL CHECK(length(public_key)=32))";
 const CREATE_SESSION_SETTINGS: &str = "CREATE TABLE peer_session_settings(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), peer_id TEXT NOT NULL, local_address TEXT NOT NULL, local_port INTEGER NOT NULL CHECK(local_port BETWEEN 1 AND 65535), role TEXT NOT NULL CHECK(role IN ('initiator','responder')))";
 const CREATE_DELIVERIES: &str = "CREATE TABLE deliveries(message_id TEXT PRIMARY KEY NOT NULL REFERENCES messages(id) ON DELETE CASCADE, state TEXT NOT NULL CHECK(state IN ('pending','acknowledged')), attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0), acknowledged_at INTEGER, CHECK((state='pending' AND acknowledged_at IS NULL) OR (state='acknowledged' AND acknowledged_at BETWEEN 0 AND 8640000000000000)))";
+
+const CREATE_CONNECTION_PROFILE: &str = "CREATE TABLE connection_profile(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), profile TEXT NOT NULL CHECK(json_valid(profile)))";
+const CREATE_INTERNET_IDENTITY: &str = "CREATE TABLE internet_identity(slot INTEGER PRIMARY KEY NOT NULL CHECK(slot=1), endpoint_id BLOB NOT NULL CHECK(length(endpoint_id)=32))";
 
 fn compact(sql: &str) -> String {
     sql.replace('"', "")
@@ -85,7 +88,7 @@ fn validate_legacy(connection: &Connection, version: i64) -> Result<(), StorageE
 pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, StorageError> {
     // Serialize opening/migration across independent repository connections.
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let identity = migrate_transaction(&transaction)?;
+    let identity = migrate_transaction(&transaction, 6)?;
     transaction.commit()?;
     Ok(identity)
 }
@@ -93,16 +96,17 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<LocalIdentity, Stor
 /// Check schema upgrades on the encrypted candidate without changing its logical copy.
 pub(crate) fn validate_upgrade(connection: &mut Connection) -> Result<(), StorageError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    migrate_transaction(&transaction)?;
+    migrate_transaction(&transaction, 6)?;
     transaction.rollback()?;
     Ok(())
 }
 
 fn migrate_transaction(
     transaction: &rusqlite::Transaction<'_>,
+    target: i64,
 ) -> Result<LocalIdentity, StorageError> {
     let version: i64 = transaction.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if !(0..=5).contains(&version) {
+    if !(0..=6).contains(&version) {
         return Err(StorageError::UnsupportedSchemaVersion(version));
     }
     let identity = if version < 3 {
@@ -150,21 +154,178 @@ fn migrate_transaction(
     }
     for (name, ddl) in [
         ("transport_identity", CREATE_TRANSPORT_IDENTITY),
-        ("trusted_peer", CREATE_TRUSTED_PEER),
         ("peer_keys", CREATE_PEER_KEYS),
         ("deliveries", CREATE_DELIVERIES),
     ] {
         validate_schema_sql(&transaction, "table", name, ddl)?;
     }
-    if version < 5 {
-        transaction.execute_batch(CREATE_SESSION_SETTINGS)?;
-        transaction.execute_batch("PRAGMA user_version = 5")?;
+    if version < 6 {
+        validate_schema_sql(&transaction, "table", "trusted_peer", CREATE_TRUSTED_PEER)?;
+        if version < 5 {
+            transaction.execute_batch(CREATE_SESSION_SETTINGS)?;
+            transaction.execute_batch("PRAGMA user_version = 5")?;
+        }
+        validate_schema_sql(
+            &transaction,
+            "table",
+            "peer_session_settings",
+            CREATE_SESSION_SETTINGS,
+        )?;
+        if target == 6 {
+            transaction.execute_batch(CREATE_CONNECTION_PROFILE)?;
+            transaction.execute_batch(CREATE_INTERNET_IDENTITY)?;
+            migrate_connection_profile(transaction)?;
+            transaction.execute_batch(
+                "DROP TABLE peer_session_settings; DROP TABLE trusted_peer; PRAGMA user_version=6;",
+            )?;
+        }
     }
-    validate_schema_sql(
-        &transaction,
-        "table",
-        "peer_session_settings",
-        CREATE_SESSION_SETTINGS,
-    )?;
+    if target == 6 {
+        validate_schema_sql(
+            &transaction,
+            "table",
+            "connection_profile",
+            CREATE_CONNECTION_PROFILE,
+        )?;
+        validate_schema_sql(
+            &transaction,
+            "table",
+            "internet_identity",
+            CREATE_INTERNET_IDENTITY,
+        )?;
+        let raw: Option<String> = transaction
+            .query_row(
+                "SELECT profile FROM connection_profile WHERE slot=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = raw {
+            let profile: crate::peer::types::ConnectionProfile =
+                serde_json::from_str(&raw).map_err(|_| StorageError::InvalidSchema)?;
+            profile
+                .validate()
+                .map_err(|_| StorageError::InvalidSchema)?;
+        }
+    }
     Ok(identity)
+}
+
+fn migrate_connection_profile(tx: &rusqlite::Transaction<'_>) -> Result<(), StorageError> {
+    use crate::peer::types::{ConnectionProfile, Invitation, Role, SessionSettings};
+    let peer: Option<(String, Vec<u8>, String)> = tx
+        .query_row(
+            "SELECT peer_id,public_key,address FROM trusted_peer WHERE slot=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    let settings: Option<(String, String, u16, String)> = tx
+        .query_row(
+            "SELECT peer_id,local_address,local_port,role FROM peer_session_settings WHERE slot=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    if settings
+        .as_ref()
+        .is_some_and(|s| peer.as_ref().is_none_or(|p| s.0 != p.0))
+    {
+        return Err(StorageError::InvalidSchema);
+    }
+    if let Some((id, key, address)) = peer {
+        let invitation = Invitation::new(
+            id.parse().map_err(|_| StorageError::InvalidSchema)?,
+            &key.try_into().map_err(|_| StorageError::InvalidSchema)?,
+            address.parse().map_err(|_| StorageError::InvalidSchema)?,
+        );
+        if invitation.peer_id != id {
+            return Err(StorageError::InvalidSchema);
+        }
+        let session = settings
+            .map(|(_, address, port, role)| {
+                Ok::<_, StorageError>(SessionSettings::Lan {
+                    local_address: address.parse().map_err(|_| StorageError::InvalidSchema)?,
+                    local_port: port,
+                    role: match role.as_str() {
+                        "initiator" => Role::Initiator,
+                        "responder" => Role::Responder,
+                        _ => return Err(StorageError::InvalidSchema),
+                    },
+                })
+            })
+            .transpose()?;
+        let profile = ConnectionProfile {
+            version: 1,
+            invitation,
+            session,
+        };
+        profile
+            .validate()
+            .map_err(|_| StorageError::InvalidSchema)?;
+        let json = serde_json::to_string(&profile).map_err(|_| StorageError::InvalidSchema)?;
+        tx.execute(
+            "INSERT INTO connection_profile(slot,profile) VALUES(1,?1)",
+            [json],
+        )?;
+    }
+    Ok(())
+}
+#[cfg(test)]
+pub(crate) fn legacy_v5(connection: &mut Connection) -> Result<LocalIdentity, StorageError> {
+    let tx = connection.transaction()?;
+    let identity = migrate_transaction(&tx, 5)?;
+    tx.commit()?;
+    Ok(identity)
+}
+
+/// Constructs historical on-disk fixtures from test data; never used by the app.
+#[cfg(test)]
+pub(crate) fn restore_legacy_fixture(c: &mut Connection) -> Result<(), StorageError> {
+    use crate::peer::types::{ConnectionProfile, Role, SessionSettings};
+    let raw: Option<String> = c
+        .query_row(
+            "SELECT profile FROM connection_profile WHERE slot=1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    c.execute_batch(CREATE_TRUSTED_PEER)?;
+    c.execute_batch(CREATE_SESSION_SETTINGS)?;
+    if let Some(raw) = raw {
+        let profile: ConnectionProfile = serde_json::from_str(&raw).unwrap();
+        let peer = profile.invitation;
+        c.execute(
+            "INSERT INTO trusted_peer(slot,peer_id,public_key,address) VALUES(1,?1,?2,?3)",
+            params![
+                peer.peer_id,
+                peer.key().unwrap().as_slice(),
+                peer.lan_address().unwrap().to_string()
+            ],
+        )?;
+        if let Some(SessionSettings::Lan {
+            local_address,
+            local_port,
+            role,
+        }) = profile.session
+        {
+            c.execute(
+                "INSERT INTO peer_session_settings VALUES(1,?1,?2,?3,?4)",
+                params![
+                    peer.peer_id,
+                    local_address.to_string(),
+                    local_port,
+                    if role == Role::Initiator {
+                        "initiator"
+                    } else {
+                        "responder"
+                    }
+                ],
+            )?;
+        }
+    }
+    c.execute_batch(
+        "DROP TABLE connection_profile; DROP TABLE internet_identity; PRAGMA user_version=5;",
+    )?;
+    Ok(())
 }

@@ -30,6 +30,6 @@ jobs:
       - run: cargo test --lib --locked
         working-directory: src-tauri
       - if: runner.os == 'macOS'
-        run: npm run tauri build -- --debug --bundles app
+        run: npm run tauri build -- --bundles app
       - if: runner.os == 'Windows'
-        run: npm run tauri build -- --debug --bundles nsis
+        run: npm run tauri build -- --bundles nsis

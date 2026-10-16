@@ -32,6 +32,7 @@ futures-util = { version = "0.3", features = ["sink"] }
 snow = "0.10"
 base64 = "0.22"
 if-addrs = "0.15"
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = "1"
 keyring-core = "1"
@@ -44,6 +45,7 @@ rusqlite = { version = "=0.40.2", features = ["bundled-sqlcipher-vendored-openss
 windows-native-keyring-store = "1"
 
 [dev-dependencies]
+iroh-relay = { version = "=1.3.0", default-features = false, features = ["server", "test-utils", "tls-ring"] }
 tempfile = "3"
 tauri = { version = "2", features = ["test"] }
 

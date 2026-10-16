@@ -190,7 +190,7 @@ mod tests {
                 .connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
     }
 
@@ -224,11 +224,11 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("messages.sqlite");
         let connection = crate::encrypted_storage::test_connection(&path).unwrap();
-        connection.execute_batch("CREATE TABLE preserved (value TEXT); INSERT INTO preserved VALUES ('keep'); PRAGMA user_version = 6;").unwrap();
+        connection.execute_batch("CREATE TABLE preserved (value TEXT); INSERT INTO preserved VALUES ('keep'); PRAGMA user_version = 7;").unwrap();
         drop(connection);
         assert!(matches!(
             SqliteMessageRepository::open(&path),
-            Err(StorageError::UnsupportedSchemaVersion(6))
+            Err(StorageError::UnsupportedSchemaVersion(7))
         ));
         let connection = crate::encrypted_storage::test_connection(&path).unwrap();
         assert_eq!(
@@ -242,7 +242,7 @@ mod tests {
             connection
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            6
+            7
         );
     }
 

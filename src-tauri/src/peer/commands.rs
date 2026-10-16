@@ -5,7 +5,7 @@ use super::{
     delivery::PendingMessage,
     keys::{KeyRepository, Keys, OsSecretStore, SecretStore, restore_keys},
     protocol::{Frame, WireMessage},
-    types::{Invitation, PeerState, Role, SessionSettings, local_addresses, local_endpoint},
+    types::{Invitation, PeerState, SessionSettings, local_addresses, local_endpoint},
 };
 use crate::{
     chat_state::ChatState,
@@ -66,12 +66,16 @@ pub struct PeerApp {
     events: Arc<dyn Events>,
     pub coordinator: Coordinator,
     operation: tokio::sync::Mutex<()>,
+    identifier: String,
+    internet_secrets: Arc<dyn crate::credentials::Credentials>,
+    internet_keys: tokio::sync::OnceCell<iroh::SecretKey>,
     keys: tokio::sync::OnceCell<(PeerId, Keys)>,
 }
 impl PeerApp {
     pub fn new(app: tauri::AppHandle, state: ChatState) -> Self {
         let secrets = Arc::new(OsSecretStore::new(&app.config().identifier));
         let database = Arc::new(Database(state));
+        let identifier = app.config().identifier.clone();
         let events = Arc::new(AppEvents(app));
         Self {
             coordinator: Coordinator::new(database.clone(), events.clone()),
@@ -79,6 +83,9 @@ impl PeerApp {
             secrets,
             events,
             operation: tokio::sync::Mutex::new(()),
+            identifier,
+            internet_secrets: Arc::new(crate::credentials::OsCredentials),
+            internet_keys: tokio::sync::OnceCell::new(),
             keys: tokio::sync::OnceCell::new(),
         }
     }
@@ -105,11 +112,60 @@ impl PeerApp {
             .await
             .cloned()
     }
+    async fn internet_key(&self) -> Result<iroh::SecretKey> {
+        self.internet_keys
+            .get_or_try_init(|| async {
+                let (own, expected) = self
+                    .work(|s| Ok((s.local_peer_id(), s.repository.internet_public_key()?)))
+                    .await?;
+                let store = self.internet_secrets.clone();
+                let identifier = self.identifier.clone();
+                let key = tokio::task::spawn_blocking(move || {
+                    super::internet_keys::restore(store.as_ref(), &identifier, own, expected)
+                })
+                .await
+                .map_err(|_| PeerError::new("key_unavailable", "internet key worker failed"))??;
+                if expected.is_none() {
+                    let public = *key.public().as_bytes();
+                    self.work(move |s| s.repository.save_internet_public_key(&public))
+                        .await?;
+                }
+                Ok(key)
+            })
+            .await
+            .cloned()
+    }
+    async fn code(&self, settings: SessionSettings) -> Result<String> {
+        let _guard = self.operation.lock().await;
+        let endpoint = if let SessionSettings::Lan {
+            local_address,
+            local_port,
+            ..
+        } = &settings
+        {
+            let (address, port) = (*local_address, *local_port);
+            Some(
+                tokio::task::spawn_blocking(move || local_endpoint(&address.to_string(), port))
+                    .await
+                    .map_err(|e| PeerError::new("internal_error", e))??,
+            )
+        } else {
+            None
+        };
+        let (own, keys) = self.keys().await?;
+        let invitation = if let Some(endpoint) = endpoint {
+            Invitation::new(own, &keys.public, endpoint)
+        } else {
+            Invitation::internet(own, &keys.public, self.internet_key().await?.public())
+        };
+        Ok(invitation.encode())
+    }
     async fn read_setup(&self) -> Result<Setup> {
         // Interface enumeration and secure-store calls never hold the chat lock.
         let addresses = tokio::task::spawn_blocking(local_addresses)
             .await
-            .map_err(|e| PeerError::new("internal_error", e))??;
+            .map_err(|e| PeerError::new("internal_error", e))?
+            .unwrap_or_default();
         self.work(move |s| {
             let own = s.local_peer_id();
             let selected_peer = s.repository.selected_peer()?;
@@ -139,23 +195,35 @@ impl PeerApp {
                 "disconnect before selecting peer",
             ));
         }
-        let copy = settings.clone();
-        let endpoint = tokio::task::spawn_blocking(move || {
-            local_endpoint(&copy.local_address.to_string(), copy.local_port)
-        })
-        .await
-        .map_err(|e| PeerError::new("internal_error", e))??;
+        settings.validate_for(&peer)?;
+        peer.validate(true)?;
+        if let SessionSettings::Lan {
+            local_address,
+            local_port,
+            ..
+        } = &settings
+        {
+            let (address, port) = (*local_address, *local_port);
+            tokio::task::spawn_blocking(move || local_endpoint(&address.to_string(), port))
+                .await
+                .map_err(|e| PeerError::new("internal_error", e))??;
+        }
         let own = self.work(|s| Ok(s.local_peer_id())).await?;
         if peer.peer()? == own {
             return Err(PeerError::new("invalid_code", "cannot connect to self"));
         }
         let (_, keys) = self.keys().await?;
+        let internet_key = if matches!(settings, SessionSettings::Internet) {
+            Some(self.internet_key().await?)
+        } else {
+            None
+        };
         let copy = peer.clone();
         let saved = settings.clone();
         self.work(move |s| s.repository.select_session(&copy, &saved))
             .await?;
         self.coordinator
-            .start(keys, own, peer, settings.role, endpoint)
+            .start_session(keys, own, peer, settings, internet_key)
             .await
     }
     async fn connect(&self, code: &str, settings: SessionSettings) -> Result<()> {
@@ -242,39 +310,18 @@ pub async fn get_peer_setup(
 }
 #[tauri::command]
 pub async fn create_connection_code(
-    address: String,
-    port: u16,
+    settings: SessionSettings,
     state: tauri::State<'_, PeerApp>,
 ) -> std::result::Result<String, IpcError> {
-    let _guard = state.operation.lock().await;
-    let endpoint = tokio::task::spawn_blocking(move || local_endpoint(&address, port))
-        .await
-        .map_err(|e| PeerError::new("internal_error", e))??;
-    let (own, keys) = state.keys().await?;
-    Ok(Invitation::new(own, &keys.public, endpoint).encode())
+    state.code(settings).await.map_err(Into::into)
 }
 #[tauri::command]
 pub async fn start_peer_session(
     code: String,
-    role: Role,
-    address: String,
-    port: u16,
+    settings: SessionSettings,
     state: tauri::State<'_, PeerApp>,
 ) -> std::result::Result<(), IpcError> {
-    let local_address = address
-        .parse()
-        .map_err(|e| IpcError::from(PeerError::new("invalid_address", e)))?;
-    state
-        .connect(
-            &code,
-            SessionSettings {
-                local_address,
-                local_port: port,
-                role,
-            },
-        )
-        .await
-        .map_err(Into::into)
+    state.connect(&code, settings).await.map_err(Into::into)
 }
 #[tauri::command]
 pub async fn reconnect_peer(state: tauri::State<'_, PeerApp>) -> std::result::Result<(), IpcError> {
@@ -340,6 +387,7 @@ pub async fn list_peer_messages(
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::{ConnectionTarget, Role};
     use super::*;
     use std::sync::{
         Barrier,
@@ -386,6 +434,9 @@ mod tests {
             secrets: secrets.clone(),
             events,
             operation: tokio::sync::Mutex::new(()),
+            identifier: "test.carnyx".into(),
+            internet_secrets: Arc::new(crate::credentials::OsCredentials),
+            internet_keys: tokio::sync::OnceCell::new(),
             keys: tokio::sync::OnceCell::new(),
         });
         let loading = {
@@ -434,11 +485,99 @@ mod tests {
             secrets,
             events,
             operation: tokio::sync::Mutex::new(()),
+            identifier: "test.carnyx".into(),
+            internet_secrets: Arc::new(crate::credentials::OsCredentials),
+            internet_keys: tokio::sync::OnceCell::new(),
             keys: tokio::sync::OnceCell::new(),
         }
     }
+    struct InternetSecrets {
+        database: ChatState,
+        value: std::sync::Mutex<Option<Vec<u8>>>,
+        fail: bool,
+    }
+    impl crate::credentials::Credentials for InternetSecrets {
+        fn load(&self, _: &str, _: &str) -> std::result::Result<Option<Vec<u8>>, ()> {
+            assert!(
+                self.database.try_lock().is_ok(),
+                "OS calls must not hold the database lock"
+            );
+            if self.fail {
+                Err(())
+            } else {
+                Ok(self.value.lock().unwrap().clone())
+            }
+        }
+        fn save(&self, _: &str, _: &str, secret: &[u8]) -> std::result::Result<(), ()> {
+            assert!(self.database.try_lock().is_ok());
+            *self.value.lock().unwrap() = Some(secret.to_vec());
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn internet_codes_use_persisted_os_identity_without_starting_a_session_or_blocking_lan() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("messages.sqlite");
+        let noise = Arc::new(MemorySecrets::default());
+        let mut first = app(&path, noise.clone());
+        let credentials = Arc::new(InternetSecrets {
+            database: first.database.0.clone(),
+            value: std::sync::Mutex::new(None),
+            fail: false,
+        });
+        first.internet_secrets = credentials.clone();
+        let code = first.code(SessionSettings::Internet).await.unwrap();
+        assert_eq!(first.coordinator.state().phase, "disconnected");
+        assert!(first.read_setup().await.unwrap().selected_peer.is_none());
+        let invitation = Invitation::decode(&code).unwrap();
+        let ConnectionTarget::Internet { endpoint_id, .. } = invitation.target else {
+            panic!("internet code")
+        };
+        assert_eq!(
+            first
+                .work(|s| s.repository.internet_public_key())
+                .await
+                .unwrap()
+                .unwrap(),
+            *endpoint_id.parse::<iroh::EndpointId>().unwrap().as_bytes()
+        );
+        drop(first);
+        let mut restored = app(&path, noise);
+        restored.internet_secrets = Arc::new(InternetSecrets {
+            database: restored.database.0.clone(),
+            value: std::sync::Mutex::new(credentials.value.lock().unwrap().clone()),
+            fail: false,
+        });
+        assert_eq!(
+            restored.code(SessionSettings::Internet).await.unwrap(),
+            code
+        );
+        // A broken internet credential store must not prevent LAN or local use.
+        restored.internet_keys = tokio::sync::OnceCell::new();
+        restored.internet_secrets = Arc::new(InternetSecrets {
+            database: restored.database.0.clone(),
+            value: std::sync::Mutex::new(None),
+            fail: true,
+        });
+        assert_eq!(
+            restored
+                .code(SessionSettings::Internet)
+                .await
+                .unwrap_err()
+                .code,
+            "key_unavailable"
+        );
+        assert!(
+            restored
+                .code(settings(32147, Role::Initiator))
+                .await
+                .unwrap()
+                .starts_with("carnyx:v1:")
+        );
+        assert_eq!(restored.coordinator.state().phase, "disconnected");
+    }
     fn settings(port: u16, role: Role) -> SessionSettings {
-        SessionSettings {
+        SessionSettings::Lan {
             local_address: std::net::Ipv4Addr::LOCALHOST,
             local_port: port,
             role,
@@ -493,7 +632,7 @@ mod tests {
         app.work(move |s| {
             s.repository.select_session(
                 &peer,
-                &SessionSettings {
+                &SessionSettings::Lan {
                     local_address: unavailable,
                     local_port: 32147,
                     role: Role::Initiator,
@@ -535,7 +674,7 @@ mod tests {
         );
         assert_eq!(app.reconnect().await.unwrap_err().code, "network_error");
         drop(listener);
-        app.work(|s| { s.repository.connection.execute_batch("CREATE TRIGGER fail_settings BEFORE INSERT ON peer_session_settings BEGIN SELECT RAISE(ABORT,'fail'); END;").map_err(|e| PeerError::new("storage_error", e))?; Ok(()) }).await.unwrap();
+        app.work(|s| { s.repository.connection.execute_batch("CREATE TRIGGER fail_settings BEFORE INSERT ON connection_profile BEGIN SELECT RAISE(ABORT,'fail'); END;").map_err(|e| PeerError::new("storage_error", e))?; Ok(()) }).await.unwrap();
         assert_eq!(
             app.connect(&peer.encode(), settings)
                 .await

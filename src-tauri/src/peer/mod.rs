@@ -1,7 +1,11 @@
 pub mod commands;
 pub mod coordinator;
 pub mod delivery;
+mod internet_keys;
+#[cfg(test)]
+mod internet_tests;
 pub mod keys;
+mod network;
 pub mod protocol;
 #[cfg(test)]
 mod tests;

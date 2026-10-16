@@ -34,7 +34,7 @@ test('setup arriving after removal is ignored and late listener is removed', asy
 });
 test('parallel actions are blocked and key failures are sanitized', async () => {
   const f=fixture();await f.store.start();const waiting=deferred();f.api.connect=()=>waiting.promise;
-  const first=f.store.connect('code','initiator','127.0.0.1',32147);await f.store.connect('code','responder','127.0.0.1',32147);
+  const first=f.store.connect('code',{mode:'lan',role:'initiator',localAddress:'127.0.0.1',localPort:32147});await f.store.connect('code',{mode:'lan',role:'responder',localAddress:'127.0.0.1',localPort:32147});
   assert.equal(f.value().busy,true);waiting.reject({ code:'authentication_failed', detail:'private path' });await first;
   assert.equal(f.value().busy,false);assert.ok(f.value().error.includes('verifiziert'));assert.ok(!f.value().error.includes('private'));
   f.store.dispose();assert.equal(f.removed(),1);
@@ -52,7 +52,7 @@ test('focus refresh can recover a failed event subscription without starting a c
 
 test('startup restores setup independently of listener failure, without starting a session', async () => {
   const f = fixture(); f.api.subscribe = async () => { throw { code: 'internal_error' }; };
-  const saved = { peerId: 'own', publicKey: null, addresses: ['127.0.0.1'], selectedPeer: { peerId: 'peer' }, session: { localAddress: '127.0.0.1', localPort: 32147, role: 'responder' } };
+  const saved = { peerId: 'own', publicKey: null, addresses: ['127.0.0.1'], selectedPeer: { peerId: 'peer', target: { mode: 'lan', address: '127.0.0.1:32147' } }, session: { mode: 'lan', localAddress: '127.0.0.1', localPort: 32147, role: 'responder' } };
   f.api.setup = async () => saved;
   await f.store.start();
   assert.deepEqual(f.value().setup, saved);

@@ -5,7 +5,7 @@ use crate::{
         PeerError, Result,
         delivery::{DeliveredMessage, DeliveryRepository, PendingMessage},
         keys::KeyRepository,
-        types::{Invitation, Role, SessionSettings},
+        types::{ConnectionProfile, Invitation, SessionSettings},
     },
     sqlite_repository::{SqliteMessageRepository, read_message},
 };
@@ -42,30 +42,7 @@ impl KeyRepository for SqliteMessageRepository {
         Ok(())
     }
     fn selected_peer(&self) -> Result<Option<Invitation>> {
-        let value: Option<(String, Vec<u8>, String)> = self
-            .connection
-            .query_row(
-                "SELECT peer_id,public_key,address FROM trusted_peer WHERE slot=1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .optional()
-            .map_err(sql)?;
-        value
-            .map(|(peer, key, address)| {
-                let peer = peer
-                    .parse()
-                    .map_err(|e| PeerError::new("storage_error", e))?;
-                let key = key
-                    .try_into()
-                    .map_err(|_| PeerError::new("storage_error", "invalid trusted key"))?;
-                let address = address
-                    .parse()
-                    .map_err(|e| PeerError::new("storage_error", e))?;
-                let invitation = Invitation::new(peer, &key, address);
-                Invitation::decode(&invitation.encode())
-            })
-            .transpose()
+        Ok(self.connection_profile()?.map(|p| p.invitation))
     }
     #[cfg(test)]
     fn select_peer(&mut self, peer: &Invitation) -> Result<()> {
@@ -74,38 +51,64 @@ impl KeyRepository for SqliteMessageRepository {
 }
 
 impl SqliteMessageRepository {
-    pub(crate) fn saved_session(&self, peer: PeerId) -> Result<Option<SessionSettings>> {
-        let value: Option<(String, u16, String)> = self.connection.query_row(
-            "SELECT local_address,local_port,role FROM peer_session_settings WHERE slot=1 AND peer_id=?1",
-            params![peer.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).optional().map_err(sql)?;
-        value
-            .map(|(address, port, role)| {
-                let role = match role.as_str() {
-                    "initiator" => Role::Initiator,
-                    "responder" => Role::Responder,
-                    _ => return Err(PeerError::new("storage_error", "invalid saved role")),
-                };
-                let settings = SessionSettings {
-                    local_address: address
-                        .parse()
-                        .map_err(|e| PeerError::new("storage_error", e))?,
-                    local_port: port,
-                    role,
-                };
-                settings
-                    .endpoint()
-                    .map_err(|e| PeerError::new("storage_error", e))?;
-                Ok(settings)
+    pub(crate) fn connection_profile(&self) -> Result<Option<ConnectionProfile>> {
+        let raw: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT profile FROM connection_profile WHERE slot=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        raw.map(|value| {
+            let profile: ConnectionProfile = serde_json::from_str(&value)
+                .map_err(|_| PeerError::new("storage_error", "invalid connection profile"))?;
+            profile
+                .validate()
+                .map_err(|_| PeerError::new("storage_error", "invalid connection profile"))?;
+            Ok(profile)
+        })
+        .transpose()
+    }
+    pub(crate) fn internet_public_key(&self) -> Result<Option<[u8; 32]>> {
+        let bytes: Option<Vec<u8>> = self
+            .connection
+            .query_row(
+                "SELECT endpoint_id FROM internet_identity WHERE slot=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        bytes
+            .map(|v| {
+                v.try_into()
+                    .map_err(|_| PeerError::new("key_unavailable", "invalid internet identity"))
             })
             .transpose()
+    }
+    pub(crate) fn save_internet_public_key(&mut self, key: &[u8; 32]) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT INTO internet_identity(slot,endpoint_id) VALUES(1,?1)",
+                [key.as_slice()],
+            )
+            .map_err(sql)?;
+        Ok(())
+    }
+    pub(crate) fn saved_session(&self, peer: PeerId) -> Result<Option<SessionSettings>> {
+        Ok(self
+            .connection_profile()?
+            .filter(|p| p.invitation.peer().ok() == Some(peer))
+            .and_then(|p| p.session))
     }
     pub(crate) fn select_session(
         &mut self,
         peer: &Invitation,
         settings: &SessionSettings,
     ) -> Result<()> {
-        settings.endpoint()?;
+        settings.validate_for(peer)?;
         self.persist_peer(peer, Some(settings))
     }
     fn persist_peer(
@@ -114,7 +117,15 @@ impl SqliteMessageRepository {
         settings: Option<&SessionSettings>,
     ) -> Result<()> {
         // Validate the same invitation path for initial setup and stored reconnects.
-        Invitation::decode(&peer.encode())?;
+        peer.validate(true)?;
+        let profile = ConnectionProfile {
+            version: 1,
+            invitation: peer.clone(),
+            session: settings.cloned(),
+        };
+        profile.validate()?;
+        let encoded = serde_json::to_string(&profile)
+            .map_err(|_| PeerError::new("storage_error", "profile serialization failed"))?;
         let transaction = self.connection.transaction().map_err(sql)?;
         let existing: Option<Vec<u8>> = transaction
             .query_row(
@@ -127,19 +138,7 @@ impl SqliteMessageRepository {
         let key = peer.key()?;
         crate::peer::keys::validate_pin(existing.as_deref(), &key)?;
         transaction.execute("INSERT INTO peer_keys(peer_id,public_key) VALUES(?1,?2) ON CONFLICT(peer_id) DO NOTHING", params![peer.peer_id,key.as_slice()]).map_err(sql)?;
-        transaction.execute("INSERT INTO trusted_peer(slot,peer_id,public_key,address) VALUES(1,?1,?2,?3) ON CONFLICT(slot) DO UPDATE SET peer_id=excluded.peer_id,public_key=excluded.public_key,address=excluded.address",params![peer.peer_id,key.as_slice(),peer.address.to_string()]).map_err(sql)?;
-        if let Some(settings) = settings {
-            let role = match settings.role {
-                Role::Initiator => "initiator",
-                Role::Responder => "responder",
-            };
-            transaction.execute("INSERT INTO peer_session_settings(slot,peer_id,local_address,local_port,role) VALUES(1,?1,?2,?3,?4) ON CONFLICT(slot) DO UPDATE SET peer_id=excluded.peer_id,local_address=excluded.local_address,local_port=excluded.local_port,role=excluded.role",
-                params![peer.peer_id, settings.local_address.to_string(), settings.local_port, role]).map_err(sql)?;
-        } else {
-            transaction
-                .execute("DELETE FROM peer_session_settings", [])
-                .map_err(sql)?;
-        }
+        transaction.execute("INSERT INTO connection_profile(slot,profile) VALUES(1,?1) ON CONFLICT(slot) DO UPDATE SET profile=excluded.profile",[encoded]).map_err(sql)?;
         transaction.commit().map_err(sql)?;
         Ok(())
     }

@@ -1,5 +1,5 @@
 import { writable, get } from "svelte/store";
-import type { PeerApi, PeerSetup, PeerState, PeerRole } from "./peer-api";
+import type { PeerApi, PeerSetup, PeerState, SessionSettings } from "./peer-api";
 import { peerError } from "./peer-errors.ts";
 
 export interface ConnectionState {
@@ -13,7 +13,7 @@ export interface ConnectionState {
 
 export function createConnectionStore(api: PeerApi) {
   const state = writable<ConnectionState>({
-    connection: { phase: "disconnected", peerId: null, revision: 0, error: null },
+    connection: { phase: "disconnected", peerId: null, revision: 0, error: null, mode: null, path: null },
     setup: null, setupStatus: "idle", setupError: null, busy: false, error: null,
   });
   let disposed = false;
@@ -81,8 +81,8 @@ export function createConnectionStore(api: PeerApi) {
   return {
     state: { subscribe: state.subscribe }, setup, start,
     refresh: () => unlisten ? Promise.all([readState(), setup()]).then(() => {}) : start(),
-    code: (address: string, port: number) => action(() => api.code(address, port)),
-    connect: (code: string, role: PeerRole, address: string, port: number) => action(async () => { await api.connect(code, role, address, port); return true; }),
+    code: (settings: SessionSettings) => action(() => api.code(settings)),
+    connect: (code: string, settings: SessionSettings) => action(async () => { await api.connect(code, settings); return true; }),
     reconnect: () => action(async () => { await api.reconnect(); return true; }),
     disconnect: () => action(() => api.disconnect()),
     dispose() { disposed = true; setupRequest++; unlisten?.(); unlisten = undefined; },
