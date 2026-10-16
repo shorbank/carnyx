@@ -43,8 +43,11 @@ the lower-right grip, and cannot be made smaller than 350 × 500. The header has
 separate minimize and close controls; only its title area moves the window. Size and
 position are not persisted.
 
-Components live in `src/lib/chat/`, shared UI elements and theme tokens in
-`src/lib/ui/`. `chat-workspace.ts` owns conversation and draft lifetimes, tab selection,
+Components live in `src/lib/components/`, grouped into `shell`, `chat`,
+`connection`, `storage` and shared `ui` elements. Controllers, stores, adapters,
+models, presentation helpers and styles have separate folders under `src/lib/`.
+Frontend tests live in `tests/frontend/controllers/` and `tests/frontend/stores/`.
+`chat-workspace.ts` owns conversation and draft lifetimes, tab selection,
 send availability and focus refreshes. `connection-setup.ts` owns endpoint validation,
 setup drafts and endpoint-bound code generation. Both are tested with injected APIs.
 Tauri window actions are isolated in `window-api.ts`; view components do not invoke
@@ -104,7 +107,10 @@ Key backup, password unlocking and rotation are outside this feature.
 `credentials.rs` contains the native credential adapter; `encrypted_storage.rs`
 contains key lifecycle and cipher connections; `encrypted_storage/migration.rs`
 contains file conversion/recovery; `storage_bootstrap.rs` controls service startup.
-`src/lib/storage/` separates the typed frontend controller/API from the gate view.
+`src/lib/controllers/storage-controller.ts`, `src/lib/adapters/storage-api.ts`
+and `src/lib/models/storage.ts` separate startup logic and typed IPC from
+`src/lib/components/storage/StorageGate.svelte`. Error text lives in
+`src/lib/presentation/storage-errors.ts`.
 The native sources, provenance, licenses and reproduction instructions are in
 `src-tauri/vendor/README.md`. macOS uses CommonCrypto; Windows builds static OpenSSL
 and needs MSVC plus Perl. CI verifies source hashes and runs the full Rust tests on

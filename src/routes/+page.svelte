@@ -1,15 +1,15 @@
 <script lang="ts">
-  import "$lib/ui/theme.css";
-  import ChatPanel from "$lib/chat/ChatPanel.svelte";
-  import { createChatWorkspace } from "$lib/chat/chat-workspace";
-  import { tauriChatApi } from "$lib/chat/chat-api";
-  import { tauriPeerApi, peerChatApi } from "$lib/chat/peer-api";
-  import { tauriWindowApi } from "$lib/chat/window-api";
-  import { browserClipboardApi } from "$lib/chat/clipboard-api";
+  import "$lib/styles/theme.css";
+  import ChatPanel from "$lib/components/shell/ChatPanel.svelte";
+  import { createChatWorkspace } from "$lib/controllers/chat-workspace";
+  import { tauriChatApi } from "$lib/adapters/chat-api";
+  import { tauriPeerApi, peerChatApi } from "$lib/adapters/peer-api";
+  import { tauriWindowApi } from "$lib/adapters/window-api";
+  import { browserClipboardApi } from "$lib/adapters/clipboard-api";
   import { onMount } from "svelte";
-  import StorageGate from "$lib/storage/StorageGate.svelte";
-  import { createStorageController } from "$lib/storage/storage-controller";
-  import { tauriStorageApi } from "$lib/storage/storage-api";
+  import StorageGate from "$lib/components/storage/StorageGate.svelte";
+  import { createStorageController } from "$lib/controllers/storage-controller";
+  import { tauriStorageApi } from "$lib/adapters/storage-api";
   const storage = createStorageController(tauriStorageApi);
   const storageStatus = storage.state;
   onMount(() => { void storage.start(); return () => storage.dispose(); });
